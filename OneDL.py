@@ -33,7 +33,7 @@ import requests
 import json
 import re
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -687,10 +687,10 @@ def find_best_debrid():
         return []
 
     print()
-    print("Available options:")
+    print(f"{CYAN}Available options:{RESET}")
     for idx, (name, cached) in enumerate(services, 1):
-        status = "Cached" if cached else "Not Cached"
-        print(f"{idx}. {name} ({status})")
+        status = f"{GREEN}Cached{RESET}" if cached else f"{RED}Not Cached{RESET}"
+        print(f"{YELLOW}{idx}{RESET}. {name} ({status})")
 
     choice = input("Choose a service: ")
     if not choice.isdigit():
