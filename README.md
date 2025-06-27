@@ -16,7 +16,7 @@ Whether you're pasting a magnet link or unlocking hoster URLs, OneDL handles eve
 - ✅ Automatically finds the best debrid service for your link  
 - ✅ Lets you select specific files from torrents and containers  
 - ✅ Shows real-time download progress with speeds  
-- ✅ Works entirely from your terminal — no GUI needed  
+- ✅ Works entirely from your terminal — no GUI needed
 
 ---
 
@@ -99,6 +99,11 @@ PREMIUMIZE_API_TOKEN = "your_premiumize_token"
 ```
 
 Tokens are optional — just set the ones you have access to.
+
+---
+
+![Screenshot](./screenshot1.png)
+![Screenshot](./screenshot2.png)
 
 ---
 
