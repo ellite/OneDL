@@ -13,6 +13,7 @@ Whether you're pasting a magnet link or unlocking hoster URLs, OneDL handles eve
   - [Real-Debrid](https://real-debrid.com/)
   - [AllDebrid](https://alldebrid.com/)
   - [Premiumize.me](https://www.premiumize.me/)
+  - [Torbox](https://torbox.app/)
 - ✅ Automatically finds the best debrid service for your link  
 - ✅ Lets you select specific files from torrents and containers  
 - ✅ Shows real-time download progress with speeds  
@@ -81,8 +82,8 @@ onedl
    - Use a debrid service
 
 3. If using a debrid service:
-   - Select Real-Debrid, AllDebrid, Premiumize.me, or "Find best option"
-   - Paste your magnet, hoster, MEGA, or HTTP(S) URL when prompted
+   - Select Real-Debrid, AllDebrid, Premiumize.me, TorBox, or "Find best option"
+   - Paste your magnet, hoster, or HTTP(S) URL when prompted
 
 4. Select specific files (if applicable), and OneDL will download them to your current folder.
 
@@ -96,6 +97,7 @@ At the top of the `OneDL.py` script, configure your API tokens:
 REAL_DEBRID_API_TOKEN = "your_real_debrid_token"
 ALLDEBRID_API_TOKEN = "your_alldebrid_token"
 PREMIUMIZE_API_TOKEN = "your_premiumize_token"
+TORBOX_API_TOKEN = "your_torbox_token"
 ```
 
 Tokens are optional — just set the ones you have access to.
