@@ -10,13 +10,13 @@ hoster URLs, MEGA folders, or standard HTTP(S) links, and download them.
 USAGE:
     1. Run the script from the folder where you want your downloaded files: onedl
     2. Choose to load URLs from a file, paste them manually, or use a debrid service.
-    3. For debrid services, select Real-Debrid, AllDebrid, Premiumize.me, or let OneDL find the best option.
+    3. For debrid services, select Real-Debrid, AllDebrid, Premiumize.me, Torbox or let OneDL find the best option.
     4. Paste your magnet, hoster, MEGA, or HTTP(S) URL when prompted.
     5. Select files if needed, and OneDL will resolve and download them for you.
 
 FEATURES:
     - Supports magnet links, hoster URLs, MEGA folders, and direct HTTP(S) links.
-    - Integrates with Real-Debrid, AllDebrid, and Premiumize.me.
+    - Integrates with Real-Debrid, AllDebrid, Premiumize.me and Torbox.
     - Shows download progress bars with speed and seeders.
     - Lets you pick files from torrents or containers.
     - Colorful, user-friendly terminal output.
@@ -26,6 +26,7 @@ Configure your API tokens at the top of this script for each service you want to
 
 import os
 import sys
+import hashlib
 import urllib.parse
 import urllib.request
 import time
@@ -33,11 +34,12 @@ import requests
 import json
 import re
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
 PREMIUMIZE_API_TOKEN = ""
+TORBOX_API_TOKEN = ""
 
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
@@ -116,20 +118,29 @@ def show_progress_factory():
 
     return show_progress
 
-def download_file(url):
+def download_file(url, filename=None):
     try:
         # Follow redirects to get the real file and filename
         with requests.get(url, stream=True, allow_redirects=True) as r:
             r.raise_for_status()
-            # Try to get filename from Content-Disposition
-            cd = r.headers.get('content-disposition')
-            if cd:
-                fname = re.findall('filename="(.+)"', cd)
-                filename = fname[0] if fname else url.split("/")[-1]
+            # Only override filename if not given
+            if filename is None:
+                # Try to get filename from Content-Disposition
+                cd = r.headers.get('content-disposition')
+                if cd:
+                    fname = re.findall('filename="(.+)"', cd)
+                    filename = fname[0] if fname else url.split("/")[-1]
+                else:
+                    # Fallback: use last part of final URL
+                    filename = r.url.split("/")[-1]
             else:
-                # Fallback: use last part of final URL
-                filename = r.url.split("/")[-1]
-                
+                cd = r.headers.get('content-disposition')
+                if cd:
+                    fname = re.findall('filename="(.+)"', cd)
+                    filename = fname[0] if fname else url.split("/")[-1]
+                else:
+                    # Fallback: use last part of final URL
+                    filename = r.url.split("/")[-1]
             filename = urllib.parse.unquote(filename)    
             print(f"Downloading: {YELLOW}{filename}{RESET}")
             show_progress = show_progress_factory()
@@ -326,7 +337,7 @@ def get_alldebrid_links(url=None):
                 magnet = info["data"]["magnets"]
                 if not isinstance(magnet, dict):
                     print(f"{RED}Unexpected magnet response.{RESET}")
-                    print(json.dumps(magnet, indent=2))
+                    
                     return []
 
                 if magnet["status"] == "waiting_files":
@@ -588,6 +599,201 @@ def get_premiumize_links(url=None):
                 return unlocked
         print(f"{RED}Hoster not supported or failed.{RESET}")
         return []
+    
+def get_torbox_links(url=None):
+    token = TORBOX_API_TOKEN or input(f"{CYAN}Enter your Torbox API token:{RESET} ").strip()
+    if not url:
+        url = input(f"{CYAN}Paste your magnet or hoster URL:{RESET} ").strip()
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    if is_magnet(url):
+        # 1️⃣ Create the torrent with multipart/form-data
+        resp = requests.post(
+            "https://api.torbox.app/v1/api/torrents/createtorrent",
+            files={
+                "magnet": (None, url),
+                "allow_zip": (None, "true"),
+                "as_queued": (None, "false"),
+            },
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success"):
+            print(f"{RED}Error creating torrent: {data.get('error')}{RESET}")
+            return []
+
+        torrent_id = data["data"].get("torrent_id") or data["data"].get("id")
+        print()
+        print(f"{GREEN}Torrent queued—ID {torrent_id}. Getting file list...{RESET}")
+
+        # 2️⃣ Get correct file list using /mylist endpoint (has real file IDs)
+        mylist_resp = requests.get(
+            "https://api.torbox.app/v1/api/torrents/mylist",
+            params={"token": TORBOX_API_TOKEN, "id": torrent_id},
+            headers=headers,
+            timeout=15,
+        )
+
+        mylist_data = mylist_resp.json()
+        if not mylist_data.get("success") or not mylist_data.get("data"):
+            print(f"{RED}Failed to fetch file list from /mylist: {mylist_data.get('error')}{RESET}")
+            return []
+
+        files = mylist_data["data"].get("files", [])
+        if not files:
+            print(f"{RED}No files found in torrent metadata.{RESET}")
+            return []
+
+        print(f"{GREEN}Found {len(files)} files. Checking which are ready...{RESET}")
+
+        # 3️⃣ File size formatting helper
+        def sizeof_fmt(num, suffix="B"):
+            for unit in ["", "K", "M", "G", "T"]:
+                if abs(num) < 1024:
+                    return f"{num:.0f} {unit}{suffix}"
+                num /= 1024
+            return f"{num:.0f} P{suffix}"
+
+        # 4️⃣ Display list to user (1-based)
+        print("Select files to download:")
+        for i, f in enumerate(files, 1):
+            print(f"{YELLOW}{i}{RESET}: {f['short_name']} {CYAN}({sizeof_fmt(f['size'])}){RESET}")
+
+        selection = input("Enter file numbers separated by commas, or 'all' [default=all]: ").strip()
+
+        if not selection or selection.lower() == "all":
+            selected_indexes = set(range(len(files)))
+        else:
+            try:
+                selected_indexes = set(
+                    int(i.strip()) - 1
+                    for i in selection.split(",")
+                    if i.strip().isdigit() and 0 < int(i.strip()) <= len(files)
+                )
+            except Exception as e:
+                print(f"{RED}Invalid selection: {e}{RESET}")
+                return []
+
+        # 5️⃣ Request download links using real file IDs
+        links = []
+
+        for idx in selected_indexes:
+            f = files[idx]
+            file_id = f["id"]  # ✅ use API-supplied file ID
+            print(f"{YELLOW}Waiting for file {CYAN}{idx + 1}{RESET}: {f['name']}{RESET}")
+
+            while True:
+                r = requests.get(
+                    "https://api.torbox.app/v1/api/torrents/requestdl",
+                    params={
+                        "token": TORBOX_API_TOKEN,
+                        "torrent_id": torrent_id,
+                        "file_id": file_id,
+                        "redirect": "false",
+                    },
+                    timeout=10,
+                )
+                resp_data = r.json()
+                if r.status_code == 200 and resp_data.get("success"):
+                    download_url = resp_data.get("data")
+                    print(f"{GREEN}File {idx + 1} is ready.{RESET}")
+                    links.append(download_url)
+                    break
+                elif "not ready" in resp_data.get("error", "").lower():
+                    print(f"{YELLOW}File {idx + 1} not ready. Retrying...{RESET}")
+                    time.sleep(5)
+                else:
+                    print(f"{RED}Unexpected error for file {idx + 1}: {resp_data}{RESET}")
+                    break
+
+        if links:
+            print(f"{GREEN}Resolved direct links:{RESET}")
+            for l in links:
+                print(f"{YELLOW}{l}{RESET}")
+        else:
+            print(f"{RED}No files could be downloaded at this time.{RESET}")
+
+        return links
+
+    else:
+        # Hoster logic
+        md5_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+        check_resp = requests.post(
+            "https://api.torbox.app/v1/api/webdl/checkcached",
+            json={"hashes": [md5_hash]},
+            headers=headers,
+            timeout=10
+        )
+        
+        if check_resp.status_code != 200 or not check_resp.json().get("success"):
+            print(f"{RED}Failed to check cached webdl.{RESET}")
+            return []
+
+        cached_data = check_resp.json().get("data", {})
+        if md5_hash not in cached_data:
+            print(f"{YELLOW}Not cached on Torbox, creating download job...{RESET}")
+            create_resp = requests.post(
+                "https://api.torbox.app/v1/api/webdl/createwebdownload",
+                json={"link": url},
+                headers=headers,
+                timeout=10
+            )
+            
+            if create_resp.status_code != 200 or not create_resp.json().get("success"):
+                print(f"{RED}Failed to create web download job.{RESET}")
+                return []
+            data = create_resp.json().get("data", {})
+            download_url = data.get("download")
+            if not download_url:
+                print(f"{RED}No download URL returned.{RESET}")
+                return []
+            print(f"{GREEN}Resolved direct link:{RESET}\n{YELLOW}{download_url}{RESET}")
+            return [download_url]
+        else:
+            print(f"{GREEN}Found cached web download. Requesting direct download link...{RESET}")
+
+            # Retrieve correct web_id using /webdl/mylist
+            mylist_resp = requests.get(
+                "https://api.torbox.app/v1/api/webdl/mylist",
+                params={"token": TORBOX_API_TOKEN},
+                headers=headers,
+                timeout=10
+            )
+            if mylist_resp.status_code != 200 or not mylist_resp.json().get("success"):
+                print(f"{RED}Failed to retrieve webdl mylist.{RESET}")
+                return []
+
+            entries = mylist_resp.json().get("data", [])
+            web_entry = next((entry for entry in entries if entry.get("hash") == md5_hash), None)
+            if not web_entry:
+                print(f"{RED}Could not find matching web_id in /webdl/mylist.{RESET}")
+                return []
+
+            web_id_value = web_entry.get("id")
+            print(f"{CYAN}Resolved web_id:{RESET} {web_id_value}")
+
+            req_resp = requests.get(
+                "https://api.torbox.app/v1/api/webdl/requestdl",
+                params={"token": TORBOX_API_TOKEN, "web_id": web_id_value},
+                headers=headers,
+                timeout=10
+            )
+
+            if req_resp.status_code == 200 and req_resp.json().get("success"):
+                download_url = req_resp.json().get("data")
+                if download_url:
+                    print(f"{YELLOW}{download_url}{RESET}")
+                    return [download_url]
+                else:
+                    print(f"{RED}No download URL returned from requestdl.{RESET}")
+                    return []
+            else:
+                print(f"{RED}Failed to request direct download link.{RESET}")
+                return []
+
 
 def get_all_files_with_links(token, folder_id):
     def fetch_folder_contents(folder_id):
@@ -665,6 +871,50 @@ def check_premiumize_cache(url):
         r = requests.get("https://www.premiumize.me/api/transfer/directdl", params={"apikey": PREMIUMIZE_API_TOKEN, "src": url})
         return r.status_code == 200 and r.json().get("status") == "success"
 
+def extract_info_hash(magnet_link):
+    match = re.search(r'btih:([a-fA-F0-9]+)', magnet_link)
+    if match:
+        return match.group(1).lower()
+    return None
+
+def check_torbox_cache(url):
+    if not TORBOX_API_TOKEN:
+        return None
+
+    headers = {"Authorization": f"Bearer {TORBOX_API_TOKEN}"}
+
+    if is_magnet(url):
+        info_hash = extract_info_hash(url)
+        if not info_hash:
+            return False
+
+        resp = requests.post(
+            "https://api.torbox.app/v1/api/torrents/checkcached",
+            json={"hashes": [info_hash]},
+            headers=headers,
+            timeout=10
+        )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            return info_hash in data.get("data", {})
+        return False
+
+    else:
+        md5_hash = hashlib.md5(url.encode()).hexdigest()
+
+        resp = requests.post(
+            "https://api.torbox.app/v1/api/webdl/checkcached",
+            json={"hashes": [md5_hash]},  # ✅ compute hash of URL string
+            headers=headers,
+            timeout=10
+        )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            return md5_hash in data.get("data", {})
+        return False
+
 def find_best_debrid():
     url = input("Paste your magnet or hoster URL: ").strip()
     print("Checking availability across services...")
@@ -681,6 +931,10 @@ def find_best_debrid():
         cached = check_premiumize_cache(url)
         if cached is not None:
             services.append(("Premiumize.me", cached))
+    if TORBOX_API_TOKEN:
+        cached = check_torbox_cache(url)
+        if cached is not None:
+            services.append(("Torbox", cached)) 
 
     if not services:
         print("No debrid services available or none support this URL.")
@@ -706,6 +960,8 @@ def find_best_debrid():
         return get_alldebrid_links(url)
     elif name == "Premiumize.me":
         return get_premiumize_links(url)
+    elif name == "Torbox":
+        return get_torbox_links(url)
     return []
 
 def main():
@@ -742,7 +998,12 @@ def main():
             options.append(get_premiumize_links)
             labels.append("Premiumize.me")
             idx += 1
-        if PREMIUMIZE_API_TOKEN or REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN:    
+        if TORBOX_API_TOKEN:
+            print(f"{YELLOW}{idx}{RESET}. Torbox")
+            options.append(get_torbox_links)
+            labels.append("Torbox")
+            idx += 1    
+        if PREMIUMIZE_API_TOKEN or REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or TORBOX_API_TOKEN:    
             print(f"{YELLOW}{idx}{RESET}. Find best option")
             options.append(find_best_debrid)
             labels.append("Find best option")
