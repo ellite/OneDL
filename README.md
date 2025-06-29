@@ -1,5 +1,9 @@
 # OneDL
 
+<p align="left">
+  <img src="./onedl.png" alt="OneDL Logo" width="200"/>
+</p>
+
 **OneDL** is a universal downloader for the command line — a single tool to download content via torrents, hosters, MEGA folders, and direct HTTP(S) links with support for Real-Debrid, AllDebrid, Premiumize.me and TorBox.
 
 Whether you're pasting a magnet link or unlocking hoster URLs, OneDL handles everything from resolving links to downloading files with a clean, interactive terminal interface.
