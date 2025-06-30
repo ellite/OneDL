@@ -3,22 +3,22 @@
 """
 OneDL - Universal Debrid & Downloader Tool
 
-OneDL is a command-line tool to simplify downloading from hosters, torrents, cloud debrid services, and direct HTTP(S) links.
-It supports Real-Debrid, AllDebrid, and Premiumize.me, allowing you to resolve direct links from magnets,
-hoster URLs, MEGA folders, or standard HTTP(S) links, and download them.
+OneDL is a command-line tool to simplify downloading from hosters, torrents, cloud debrid services, direct HTTP(S) links, and container files (.torrent & .nzb).
+It supports Real-Debrid, AllDebrid, Premiumize.me, and Torbox, allowing you to resolve direct links from magnets,
+hoster URLs, MEGA folders, standard HTTP(S) links, or by uploading .torrent and .nzb files, and download them.
 
 USAGE:
     1. Run the script from the folder where you want your downloaded files: onedl
     2. Choose to load URLs from a file, paste them manually, or use a debrid service.
     3. For debrid services, select Real-Debrid, AllDebrid, Premiumize.me, Torbox or let OneDL find the best option.
-    4. Paste your magnet, hoster, MEGA, or HTTP(S) URL when prompted.
+    4. Paste your magnet, hoster, MEGA, HTTP(S) URL, or upload a .torrent/.nzb file when prompted.
     5. Select files if needed, and OneDL will resolve and download them for you.
 
 FEATURES:
-    - Supports magnet links, hoster URLs, MEGA folders, and direct HTTP(S) links.
+    - Supports magnet links, hoster URLs, MEGA folders, direct HTTP(S) links, and container files (.torrent & .nzb).
     - Integrates with Real-Debrid, AllDebrid, Premiumize.me and Torbox.
     - Shows download progress bars with speed and seeders.
-    - Lets you pick files from torrents or containers.
+    - Lets you pick files from torrents, NZBs, or containers.
     - Colorful, user-friendly terminal output.
 
 Configure your API tokens at the top of this script for each service you want to use.
@@ -28,13 +28,13 @@ import os
 import sys
 import hashlib
 import urllib.parse
-import urllib.request
 import time
 import requests
 import json
 import re
+import bencodepy
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -156,6 +156,21 @@ def download_file(url, filename=None):
     except Exception as e:
         print(f"{RED}Failed to download:{RESET} {YELLOW}{url}{RESET} {RED}- {e}{RESET}")
 
+def torrent_to_magnet(filepath):
+    with open(filepath, 'rb') as f:
+        torrent = bencodepy.decode(f.read())
+    info = torrent[b'info']
+    # Get the bencoded info dict and SHA1 hash
+    info_bencoded = bencodepy.encode(info)
+    info_hash = hashlib.sha1(info_bencoded).hexdigest()
+    # Get display name
+    name = info.get(b'name', b'').decode('utf-8', errors='ignore')
+    # Build magnet link
+    magnet = f"magnet:?xt=urn:btih:{info_hash}"
+    if name:
+        magnet += f"&dn={urllib.parse.quote(name)}"
+    return magnet
+
 def is_magnet(url):
     return url.strip().startswith("magnet:")
 
@@ -249,7 +264,7 @@ def get_real_debrid_links(url=None):
                 if info["status"] != "downloading":
                     print()  # Print newline after progress bar when done
                 time.sleep(3)
-    elif "mega.nz/folder/" in url:
+    elif "mega.nz/folder/" in url and "/file/" not in url and PREMIUMIZE_API_TOKEN:
         # Extract file links from folder
         file_links = extract_mega_file_links_with_premiumize(url)
         if not file_links:
@@ -424,7 +439,7 @@ def get_alldebrid_links(url=None):
             else:
                 print(f"{YELLOW}Waiting for AllDebrid...{RESET}")
                 time.sleep(3)
-    elif "mega.nz/folder/" in url and PREMIUMIZE_API_TOKEN:
+    elif "mega.nz/folder/" in url and "/file/" not in url and PREMIUMIZE_API_TOKEN:
         # Extract file links from folder using Premiumize
         file_links = extract_mega_file_links_with_premiumize(url)
         if not file_links:
@@ -619,6 +634,7 @@ def get_torbox_links(url=None):
             headers=headers,
             timeout=10
         )
+
         resp.raise_for_status()
         data = resp.json()
         if not data.get("success"):
@@ -717,7 +733,28 @@ def get_torbox_links(url=None):
             print(f"{RED}No files could be downloaded at this time.{RESET}")
 
         return links
-
+    elif "mega.nz/folder/" in url and "/file/" not in url and PREMIUMIZE_API_TOKEN:
+        # Extract file links from folder using Premiumize
+        file_links = extract_mega_file_links_with_premiumize(url)
+        if not file_links:
+            print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
+            return []
+        unlocked = []
+        for f in file_links:
+            resp = requests.post(
+                "https://api.torbox.app/v1/api/webdl/unrestrict",
+                json={"link": f},
+                headers=headers,
+                timeout=10
+            )
+            data = resp.json()
+            if data.get("success") and "download" in data.get("data", {}):
+                print(f"{GREEN}Unlocked:{RESET} {YELLOW}{f}{RESET} {CYAN}→{RESET} {GREEN}{data['data']['download']}{RESET}")
+                unlocked.append(data["data"]["download"])
+            else:
+                print(f"{RED}Could not unlock:{RESET} {YELLOW}{f}{RESET}")
+        return unlocked
+    
     else:
         # Hoster logic
         md5_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
@@ -725,9 +762,9 @@ def get_torbox_links(url=None):
             "https://api.torbox.app/v1/api/webdl/checkcached",
             json={"hashes": [md5_hash]},
             headers=headers,
-            timeout=10
+            timeout=30
         )
-        
+
         if check_resp.status_code != 200 or not check_resp.json().get("success"):
             print(f"{RED}Failed to check cached webdl.{RESET}")
             return []
@@ -737,42 +774,121 @@ def get_torbox_links(url=None):
             print(f"{YELLOW}Not cached on Torbox, creating download job...{RESET}")
             create_resp = requests.post(
                 "https://api.torbox.app/v1/api/webdl/createwebdownload",
-                json={"link": url},
+                data={"link": url},
                 headers=headers,
-                timeout=10
+                timeout=30
             )
-            
+
             if create_resp.status_code != 200 or not create_resp.json().get("success"):
                 print(f"{RED}Failed to create web download job.{RESET}")
                 return []
-            data = create_resp.json().get("data", {})
-            download_url = data.get("download")
-            if not download_url:
-                print(f"{RED}No download URL returned.{RESET}")
-                return []
-            print(f"{GREEN}Resolved direct link:{RESET}\n{YELLOW}{download_url}{RESET}")
-            return [download_url]
-        else:
-            print(f"{GREEN}Found cached web download. Requesting direct download link...{RESET}")
 
-            # Retrieve correct web_id using /webdl/mylist
-            mylist_resp = requests.get(
-                "https://api.torbox.app/v1/api/webdl/mylist",
-                params={"token": TORBOX_API_TOKEN},
+            data = create_resp.json().get("data", {})
+            web_id = data.get("webdownload_id")
+            if not web_id:
+                print(f"{RED}Job created but no webdownload_id returned.{RESET}")
+                return []
+
+            print(f"{GREEN}Created download job with ID {web_id}. {RESET}")
+            last_state = None
+            printed_progress = False
+
+            while True:
+                mylist_resp = requests.get(
+                    "https://api.torbox.app/v1/api/webdl/mylist",
+                    params={"token": TORBOX_API_TOKEN},
+                    headers=headers,
+                    timeout=30
+                )
+                if mylist_resp.status_code != 200 or not mylist_resp.json().get("success"):
+                    print(f"{RED}Failed to retrieve webdl mylist.{RESET}")
+                    return []
+
+                entries = mylist_resp.json().get("data", [])
+                entry = next((e for e in entries if e.get("id") == web_id), None)
+                if not entry:
+                    print(f"{RED}Web download entry not found in list.{RESET}")
+                    return []
+
+                state = entry.get("download_state")
+                progress = entry.get("progress", 0.0)
+                speed = entry.get("download_speed", 0)
+
+                if state != last_state:
+                    readable_state = state.capitalize() if state else "Unknown"
+                    print(f"{CYAN}State: {readable_state}{RESET}")
+                    last_state = state
+
+                    # Once we leave 'downloading', print a 100% bar only once
+                    if state != "downloading" and not printed_progress:
+                        sys.stdout.write(
+                            f"{YELLOW}Downloading to cloud...{RESET} ["
+                            + "#" * 30 +
+                            f"] 100% :: {CYAN}{speed / (1024 * 1024):.2f} MB/s{RESET}\n"
+                        )
+                        sys.stdout.flush()
+                        printed_progress = True
+
+                if state == "downloading" and not printed_progress:
+                    bar_len = 30
+                    bar = "#" * int(progress * bar_len)
+                    bar = bar.ljust(bar_len)
+                    percent = int(progress * 100)
+                    speed_mb = f"{speed / (1024 * 1024):.2f} MB/s" if speed else "–"
+
+                    sys.stdout.write(
+                        f"\r{YELLOW}Downloading to cloud...{RESET} [{bar}] {GREEN}{percent}%{RESET} :: {CYAN}{speed_mb}{RESET}   "
+                    )
+                    sys.stdout.flush()
+
+                if state == "completed":
+                    print()
+                    break
+                elif state == "error":
+                    print(f"{RED}Download failed on Torbox side.{RESET}")
+                    return []
+
+                time.sleep(5)
+
+            # Now request the download
+            req_resp = requests.get(
+                "https://api.torbox.app/v1/api/webdl/requestdl",
+                params={"token": TORBOX_API_TOKEN, "web_id": web_id},
                 headers=headers,
                 timeout=10
             )
-            if mylist_resp.status_code != 200 or not mylist_resp.json().get("success"):
-                print(f"{RED}Failed to retrieve webdl mylist.{RESET}")
+
+            if req_resp.status_code == 200 and req_resp.json().get("success"):
+                download_url = req_resp.json().get("data")
+                if download_url:
+                    print(f"{GREEN}Resolved direct link:{RESET}\n{YELLOW}{download_url}{RESET}")
+                    return [download_url]
+                else:
+                    print(f"{RED}No download URL returned from requestdl.{RESET}")
+                    return []
+            else:
+                print(f"{RED}Failed to request direct download link.{RESET}")
                 return []
 
-            entries = mylist_resp.json().get("data", [])
-            web_entry = next((entry for entry in entries if entry.get("hash") == md5_hash), None)
-            if not web_entry:
-                print(f"{RED}Could not find matching web_id in /webdl/mylist.{RESET}")
+        else:
+            print(f"{GREEN}Found cached web download. Adding it to your list...{RESET}")
+
+            create_resp = requests.post(
+                "https://api.torbox.app/v1/api/webdl/createwebdownload",
+                data={"link": url},
+                headers=headers,
+                timeout=30
+            )
+            if create_resp.status_code != 200 or not create_resp.json().get("success"):
+                print(f"{RED}Failed to create web download job for cached URL.{RESET}")
                 return []
 
-            web_id_value = web_entry.get("id")
+            data = create_resp.json().get("data", {})
+            web_id_value = data.get("webdownload_id")
+            if not web_id_value:
+                print(f"{RED}Job created but no webdownload_id returned.{RESET}")
+                return []
+
             print(f"{CYAN}Resolved web_id:{RESET} {web_id_value}")
 
             req_resp = requests.get(
@@ -793,6 +909,280 @@ def get_torbox_links(url=None):
             else:
                 print(f"{RED}Failed to request direct download link.{RESET}")
                 return []
+
+def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
+    from pathlib import Path
+    import requests, time
+
+    print(f"{CYAN}Processing NZB via Premiumize...{RESET}")
+    params = {'apikey': PREMIUMIZE_API_TOKEN}
+    nzb_name = Path(nzb_path).name
+
+    try:
+        # 1️⃣ Create transfer
+        with open(nzb_path, "rb") as f:
+            resp = requests.post(
+                "https://www.premiumize.me/api/transfer/create",
+                params=params,
+                files={'file': (nzb_name, f, 'application/x-nzb')},
+                timeout=30
+            )
+
+        data = resp.json()
+
+        if data.get("status") != "success":
+            if data.get("message") == "You have already added this nzb file.":
+                print(f"{YELLOW}NZB already added. Attempting to find in transfer list...{RESET}")
+                list_resp = requests.get(
+                    "https://www.premiumize.me/api/transfer/list",
+                    params=params,
+                    timeout=10
+                ).json()
+
+                transfers = list_resp.get("transfers", [])
+                match = next((t for t in transfers if t.get("name") == nzb_name), None)
+                if match:
+                    transfer_id = match.get("id")
+                    print(f"{GREEN}Found existing transfer with ID {transfer_id}. Proceeding...{RESET}")
+                else:
+                    print(f"{RED}Could not find existing transfer for this NZB.{RESET}")
+                    return []
+            else:
+                print(f"{RED}Transfer failed: {data.get('error') or data.get('message')}{RESET}")
+                return []
+        else:
+            transfer_id = data["id"]
+            print(f"{GREEN}Transfer queued—ID {transfer_id}. {RESET}")
+
+        # 2️⃣ Poll until done (“finished” or “error”)
+        status = None
+        try:
+            while True:
+                lst = requests.get(
+                    "https://www.premiumize.me/api/transfer/list",
+                    params={**params, 'id': transfer_id},
+                    timeout=10
+                ).json()
+
+                info = lst.get("transfers", [{}])[0]
+                status = info.get("status")
+                message = (info.get("message") or "").strip()
+                progress = info.get("progress") or 0
+
+                if status not in ("finished", "error"):
+                    # Draw progress bar
+                    bar_length = 30
+                    bar = '#' * int(progress * bar_length)
+                    bar = bar.ljust(bar_length)
+                    percent = int(progress * 100)
+                    sys.stdout.write(
+                        f"\r{YELLOW}Downloading to cloud...{RESET} [{YELLOW}{bar}{RESET}] {GREEN}{percent}%{RESET} | {message}   "
+                    )
+                    sys.stdout.flush()
+
+                if status in ("finished", "error"):
+                    print()  # finish the line
+                    break
+
+                time.sleep(3)
+
+        except KeyboardInterrupt:
+            print(f"\n{RED}Cancelled by user.{RESET}")
+            return []
+
+        if status != "finished":
+            error_message = (info.get("message") or "").strip().lower()
+
+            if "cannot be completed" in error_message:
+                print(f"{RED}Premiumize could not complete this NZB. It was aborted on their side and cannot be downloaded.{RESET}")
+            else:
+                print(f"{RED}Transfer did not finish (status={status}){RESET}")
+            return []
+
+        # 3️⃣ Try direct download via src first
+        dl_resp = requests.post(
+            "https://www.premiumize.me/api/transfer/directdl",
+            data={"src": info.get("src")},
+            params={"apikey": PREMIUMIZE_API_TOKEN},
+            timeout=10
+        )
+        dl_data = dl_resp.json()
+
+        if dl_data.get("status") == "success":
+            content = dl_data.get("content", [])
+            if not content:
+                print(f"{RED}No files in direct download response.{RESET}")
+                return []
+
+            print(f"{GREEN}Found {len(content)} file(s).{RESET}")
+            for idx, f in enumerate(content, 1):
+                name = f.get("path", "Unknown")
+                size = f.get("size", 0)
+                mb = size // (1024 * 1024)
+                print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
+
+            choice = input(f"{CYAN}Enter file numbers separated by commas, or 'all' (default all):{RESET} ").strip()
+            if not choice or choice.lower() == "all":
+                selected_indexes = set(range(len(content)))
+            else:
+                try:
+                    selected_indexes = set(
+                        int(i.strip()) - 1
+                        for i in choice.split(",")
+                        if i.strip().isdigit() and 0 < int(i.strip()) <= len(content)
+                    )
+                except Exception as e:
+                    print(f"{RED}Invalid selection: {e}{RESET}")
+                    return []
+
+            return [content[i]["link"] for i in selected_indexes if content[i].get("link")]
+        else:
+            # 4️⃣ Fall back to /folder/list
+            folder_id = info.get("folder_id")
+            if not folder_id:
+                print(f"{RED}No folder ID available to list contents.{RESET}")
+                return []
+
+            folder_resp = requests.get(
+                "https://www.premiumize.me/api/folder/list",
+                params={"id": folder_id, "apikey": PREMIUMIZE_API_TOKEN},
+                timeout=10
+            )
+            folder_data = folder_resp.json()
+
+            if folder_data.get("status") != "success":
+                print(f"{RED}Failed to list folder: {folder_data.get('message')}{RESET}")
+                return []
+
+            files = [f for f in folder_data.get("content", []) if f.get("type") == "file" and f.get("link")]
+            if not files:
+                print(f"{RED}No downloadable files found in folder.{RESET}")
+                return []
+
+            print(f"{GREEN}Found {len(files)} file(s).{RESET}")
+            for idx, f in enumerate(files, 1):
+                name = f.get("name", "Unknown")
+                size = f.get("size", 0)
+                mb = size // (1024 * 1024)
+                print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
+
+            choice = input(f"{CYAN}Enter file numbers separated by commas, or 'all' (default all):{RESET} ").strip()
+            if not choice or choice.lower() == "all":
+                selected_indexes = set(range(len(files)))
+            else:
+                try:
+                    selected_indexes = set(
+                        int(i.strip()) - 1
+                        for i in choice.split(",")
+                        if i.strip().isdigit() and 0 < int(i.strip()) <= len(files)
+                    )
+                except Exception as e:
+                    print(f"{RED}Invalid selection: {e}{RESET}")
+                    return []
+
+            return [files[i]["link"] for i in selected_indexes]
+
+    except Exception as e:
+        print(f"{RED}Exception during Premiumize NZB processing: {e}{RESET}")
+        return []
+
+
+def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
+    print(f"{CYAN}Uploading NZB to Torbox...{RESET}")
+
+    headers = {"Authorization": f"Bearer {TORBOX_API_TOKEN}"}
+
+    try:
+        upload_url = "https://api.torbox.app/v1/api/usenet/createusenetdownload"
+        with open(nzb_path, "rb") as f:
+            files = {
+                'file': (os.path.basename(nzb_path), f, 'application/x-nzb')
+            }
+            upload_resp = requests.post(
+                upload_url,
+                files=files,
+                headers=headers,
+                timeout=30
+            )
+
+        if upload_resp.status_code != 200 or not upload_resp.json().get("success"):
+            print(f"{RED}Failed to upload NZB to Torbox.{RESET}")
+            return []
+
+        upload_data = upload_resp.json().get("data", {})
+        usenet_id = upload_data.get("usenetdownload_id")
+        if not usenet_id:
+            print(f"{RED}Upload succeeded but no ID returned.{RESET}")
+            return []
+
+        # Now query mylist to get all file entries
+        print(f"{CYAN}Getting download info for Usenet ID {usenet_id}...{RESET}")
+        mylist_resp = requests.get(
+            "https://api.torbox.app/v1/api/usenet/mylist",
+            params={"token": TORBOX_API_TOKEN, "id": usenet_id},
+            headers=headers,
+            timeout=30
+        )
+
+        if mylist_resp.status_code != 200 or not mylist_resp.json().get("success"):
+            print(f"{RED}Failed to query mylist for NZB.{RESET}")
+            return []
+
+        mylist_data = mylist_resp.json().get("data", {})
+        files = mylist_data.get("files", [])
+        if not files:
+            print(f"{RED}No files found in mylist response.{RESET}")
+            return []
+
+        print(f"{GREEN}Found {len(files)} file(s).{RESET}")
+        for idx, f in enumerate(files, 1):
+            name = f.get("name", "Unknown")
+            size = f.get("size", 0)
+            mb = size // (1024 * 1024)
+            print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
+
+        # Prompt user for selection
+        choice = input(f"{CYAN}Enter file numbers separated by commas, or 'all' (default all):{RESET} ").strip()
+        if not choice or choice.lower() == "all":
+            selected_indexes = set(range(len(files)))
+        else:
+            try:
+                selected_indexes = set(
+                    int(i.strip()) - 1
+                    for i in choice.split(",")
+                    if i.strip().isdigit() and 0 < int(i.strip()) <= len(files)
+                )
+            except Exception as e:
+                print(f"{RED}Invalid selection: {e}{RESET}")
+                return []
+
+        print(f"{GREEN}Requesting download links...{RESET}")
+        urls = []
+        for idx in selected_indexes:
+            f = files[idx]
+            fid = f.get("id")
+            name = f.get("name", "Unknown")
+            dl_resp = requests.get(
+                "https://api.torbox.app/v1/api/usenet/requestdl",
+                params={"token": TORBOX_API_TOKEN, "usenet_id": usenet_id, "file_id": fid},
+                headers=headers,
+                timeout=30
+            )
+            if dl_resp.status_code == 200 and dl_resp.json().get("success"):
+                url = dl_resp.json().get("data")
+                if url:
+                    print(f"{YELLOW}{name}:{RESET} {url}")
+                    urls.append(url)
+                else:
+                    print(f"{RED}No URL for {name}.{RESET}")
+            else:
+                print(f"{RED}Failed to get download for {name}.{RESET}")
+
+        return urls
+
+    except Exception as e:
+        print(f"{RED}Exception during NZB upload or download: {e}{RESET}")
+        return []
 
 
 def get_all_files_with_links(token, folder_id):
@@ -915,8 +1305,9 @@ def check_torbox_cache(url):
             return md5_hash in data.get("data", {})
         return False
 
-def find_best_debrid():
-    url = input("Paste your magnet or hoster URL: ").strip()
+def find_best_debrid(url: str = None) -> list[str]:
+    if not url:
+        url = input("Paste your magnet or hoster URL: ").strip()
     print("Checking availability across services...")
     services = []
     if REAL_DEBRID_API_TOKEN:
@@ -964,6 +1355,10 @@ def find_best_debrid():
         return get_torbox_links(url)
     return []
 
+def list_container_files():
+    files = [f for f in os.listdir('.') if os.path.isfile(f) and (f.endswith('.torrent') or f.endswith('.nzb'))]
+    return files
+
 def main():
     print(f"{CYAN}OneDL v{VERSION}{RESET}")
     print()
@@ -979,36 +1374,110 @@ def main():
         urls = get_urls_from_input()
     elif choice == '3':
         print()
+        print(f"{CYAN}What do you want to do?{RESET}")
+        print(f"{YELLOW}1{RESET}. Add Magnet or URL")
+        print(f"{YELLOW}2{RESET}. Upload Container File (.torrent or .nzb)")
+        submode = input("Enter 1 or 2: ").strip()
+        if submode not in ("1", "2"):
+            print(f"{RED}Invalid choice.{RESET}")
+            return
+
+        if submode == "2":
+            files = list_container_files()
+            if not files:
+                print(f"{RED}No .torrent or .nzb files found in this folder.{RESET}")
+                return
+            print()
+            print(f"{CYAN}Select a container file to upload:{RESET}")
+            for idx, f in enumerate(files, 1):
+                print(f"{YELLOW}{idx}{RESET}: {f}")
+            while True:
+                file_choice = input("Enter the number of the file: ").strip()
+                if file_choice.isdigit() and 1 <= int(file_choice) <= len(files):
+                    container_file = files[int(file_choice) - 1]
+                    break
+                print(f"{RED}Invalid choice, try again.{RESET}")
+            ext = os.path.splitext(container_file)[1].lower()
+        else:
+            container_file = None
+            ext = None
+
+        print()
         print(f"{CYAN}Which debrid service do you want to use?{RESET}")
         idx = 1
         options = []
         labels = []
-        if REAL_DEBRID_API_TOKEN:
-            print(f"{YELLOW}{idx}{RESET}. Real-Debrid")
-            options.append(get_real_debrid_links)
-            labels.append("Real-Debrid")
-            idx += 1
-        if ALLDEBRID_API_TOKEN:
-            print(f"{YELLOW}{idx}{RESET}. AllDebrid")
-            options.append(get_alldebrid_links)
-            labels.append("AllDebrid")
-            idx += 1
-        if PREMIUMIZE_API_TOKEN:
-            print(f"{YELLOW}{idx}{RESET}. Premiumize.me")
-            options.append(get_premiumize_links)
-            labels.append("Premiumize.me")
-            idx += 1
-        if TORBOX_API_TOKEN:
-            print(f"{YELLOW}{idx}{RESET}. Torbox")
-            options.append(get_torbox_links)
-            labels.append("Torbox")
-            idx += 1    
-        if PREMIUMIZE_API_TOKEN or REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or TORBOX_API_TOKEN:    
+        show_find_best = False
+
+        if submode == "2":
+            # Container file mode
+            if ext == ".torrent":
+                if REAL_DEBRID_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. Real-Debrid")
+                    options.append(get_real_debrid_links)
+                    labels.append("Real-Debrid")
+                    idx += 1
+                if ALLDEBRID_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. AllDebrid")
+                    options.append(get_alldebrid_links)
+                    labels.append("AllDebrid")
+                    idx += 1
+                if PREMIUMIZE_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. Premiumize.me")
+                    options.append(get_premiumize_links)
+                    labels.append("Premiumize.me")
+                    idx += 1
+                if TORBOX_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. Torbox")
+                    options.append(get_torbox_links)
+                    labels.append("Torbox")
+                    idx += 1
+                show_find_best = sum(bool(x) for x in [REAL_DEBRID_API_TOKEN, ALLDEBRID_API_TOKEN, PREMIUMIZE_API_TOKEN, TORBOX_API_TOKEN]) > 1
+            elif ext == ".nzb":
+                if PREMIUMIZE_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. Premiumize.me")
+                    options.append(get_premiumize_links)
+                    labels.append("Premiumize.me")
+                    idx += 1
+                if TORBOX_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. Torbox")
+                    options.append(get_torbox_links)
+                    labels.append("Torbox")
+                    idx += 1
+            else:
+                print(f"{RED}Unsupported file type: {ext}{RESET}")
+                return
+        else:
+            # Magnet/URL mode (original logic)
+            if REAL_DEBRID_API_TOKEN:
+                print(f"{YELLOW}{idx}{RESET}. Real-Debrid")
+                options.append(get_real_debrid_links)
+                labels.append("Real-Debrid")
+                idx += 1
+            if ALLDEBRID_API_TOKEN:
+                print(f"{YELLOW}{idx}{RESET}. AllDebrid")
+                options.append(get_alldebrid_links)
+                labels.append("AllDebrid")
+                idx += 1
+            if PREMIUMIZE_API_TOKEN:
+                print(f"{YELLOW}{idx}{RESET}. Premiumize.me")
+                options.append(get_premiumize_links)
+                labels.append("Premiumize.me")
+                idx += 1
+            if TORBOX_API_TOKEN:
+                print(f"{YELLOW}{idx}{RESET}. Torbox")
+                options.append(get_torbox_links)
+                labels.append("Torbox")
+                idx += 1
+            show_find_best = sum(bool(x) for x in [REAL_DEBRID_API_TOKEN, ALLDEBRID_API_TOKEN, PREMIUMIZE_API_TOKEN, TORBOX_API_TOKEN]) > 1
+
+        if show_find_best:
             print(f"{YELLOW}{idx}{RESET}. Find best option")
             options.append(find_best_debrid)
             labels.append("Find best option")
-        else:
-            print(f"{RED}No debrid services configured.{RESET}")
+
+        if not options:
+            print(f"{RED}No debrid services configured for this file type.{RESET}")
             return
 
         sub_choice = input("Enter your choice: ").strip()
@@ -1016,12 +1485,27 @@ def main():
             print(f"{RED}Invalid choice.{RESET}")
             return
         sub_choice = int(sub_choice)
-        if 1 <= sub_choice < idx:
+        if 1 <= sub_choice <= len(options):
             print()
-            url = input("Paste your magnet or hoster URL: ").strip()
-            urls = options[sub_choice - 1](url)
-        elif sub_choice == idx:
-            urls = options[sub_choice - 1]()
+            if submode == "2":
+                if ext == ".torrent":
+                    print(f"{CYAN}Using container file: {container_file}{RESET}")
+                    magnet_url = torrent_to_magnet(container_file)
+                    urls = options[sub_choice - 1](magnet_url)
+                elif ext == ".nzb":
+                    # Check choice for TorBox or Premiumize
+                    if options[sub_choice - 1] == get_torbox_links:
+                        print(f"{CYAN}Using NZB file: {container_file}{RESET}")
+                        urls = get_torbox_links_from_nzb(container_file)
+                    elif options[sub_choice - 1] == get_premiumize_links:
+                        print(f"{CYAN}Using NZB file: {container_file}{RESET}")
+                        urls = get_premiumize_links_from_nzb(container_file)
+                else:
+                    print(f"{RED}Unsupported file type.{RESET}")
+                    return
+            else:
+                url = input("Paste your magnet or hoster URL: ").strip()
+                urls = options[sub_choice - 1](url)
         else:
             print(f"{RED}Invalid choice.{RESET}")
             return
