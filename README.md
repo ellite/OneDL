@@ -12,14 +12,14 @@ Whether you're pasting a magnet link or unlocking hoster URLs, OneDL handles eve
 
 ## ✨ Features
 
-- ✅ Supports **magnet links**, **hoster URLs**, **MEGA folders**, and **direct HTTP(S)** links  
+- ✅ Supports **magnet links**, **hoster URLs**, **MEGA folders**, **Torrent files**, **NZB files**, and **direct HTTP(S)** links  
 - ✅ Integrates with:
   - [Real-Debrid](https://real-debrid.com/)
   - [AllDebrid](https://alldebrid.com/)
   - [Premiumize.me](https://www.premiumize.me/)
   - [Torbox](https://torbox.app/)
 - ✅ Automatically finds the best debrid service for your link  
-- ✅ Lets you select specific files from torrents and containers  
+- ✅ Lets you select specific files from torrents, NZBs, and containers
 - ✅ Shows real-time download progress with speeds  
 - ✅ Works entirely from your terminal — no GUI needed
 
@@ -42,7 +42,7 @@ If it's not installed, download it from [python.org](https://www.python.org/down
 The only required external Python package is `requests`. Install it with:
 
 ```bash
-pip install requests
+pip install requests bencodepy
 ```
 
 > Use `pip3` if you're on a system where `pip` refers to Python 2.
@@ -86,8 +86,8 @@ onedl
    - Use a debrid service
 
 3. If using a debrid service:
-   - Select Real-Debrid, AllDebrid, Premiumize.me, TorBox, or "Find best option"
-   - Paste your magnet, hoster, or HTTP(S) URL when prompted
+   - Select Real-Debrid, AllDebrid, Premiumize.me, Torbox, or "Find best option"
+   - Paste your magnet, hoster, or HTTP(S) URL when prompted, or upload a .torrent or .nzb file
 
 4. Select specific files (if applicable), and OneDL will download them to your current folder.
 
