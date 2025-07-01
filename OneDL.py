@@ -36,7 +36,7 @@ import bencodepy
 import base64
 import struct
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -1277,39 +1277,109 @@ def extract_mega_file_links_with_premiumize(folder_url):
 def check_real_debrid_cache(url):
     if not REAL_DEBRID_API_TOKEN:
         return None
+
     headers = {"Authorization": f"Bearer {REAL_DEBRID_API_TOKEN}"}
+
     if is_magnet(url):
-        info = requests.get("https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/" + urllib.parse.quote(url), headers=headers).json()
-        return bool(info and any(info.values()))
+        try:
+            resp = requests.get(
+                "https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/" + urllib.parse.quote(url),
+                headers=headers
+            )
+            data = resp.json()
+            if "error" in data and data["error"] == "hoster_unsupported":
+                return ("not_supported", None)
+            return ("supported", bool(data and any(data.values())))
+        except Exception:
+            return ("not_supported", None)
     else:
-        resp = requests.post("https://api.real-debrid.com/rest/1.0/unrestrict/link", data={"link": url}, headers=headers)
-        return resp.status_code == 200 and "download" in resp.json()
+        try:
+            resp = requests.post(
+                "https://api.real-debrid.com/rest/1.0/unrestrict/link",
+                data={"link": url},
+                headers=headers
+            )
+            data = resp.json()
+            if resp.status_code != 200:
+                if isinstance(data, dict) and data.get("error") == "hoster_unsupported":
+                    return ("not_supported", None)
+                return ("supported", False)
+            return ("supported", "download" in data)
+        except Exception:
+            return ("not_supported", None)
+
 
 def check_alldebrid_cache(url):
     if not ALLDEBRID_API_TOKEN:
         return None
-    if is_magnet(url):
-        r = requests.get("https://api.alldebrid.com/v4/magnet/instant", params={"apikey": ALLDEBRID_API_TOKEN, "magnets[]": url})
-        data = r.json()
-        return data.get("status") == "success" and data.get("data", {}).get("instant")
-    else:
-        r = requests.get("https://api.alldebrid.com/v4/link/unlock", params={"apikey": ALLDEBRID_API_TOKEN, "link": url})
-        return r.status_code == 200 and r.json().get("status") == "success"
+
+    try:
+        if is_magnet(url):
+            r = requests.get(
+                "https://api.alldebrid.com/v4/magnet/instant",
+                params={"apikey": ALLDEBRID_API_TOKEN, "magnets[]": url}
+            )
+            data = r.json()
+            if data.get("status") == "success":
+                cached = data.get("data", {}).get("instant", False)
+                return ("supported", cached)
+            elif data.get("error", {}).get("code") == "MAGNET_NOT_SUPPORTED":
+                return ("not_supported", None)
+            else:
+                return ("supported", False)
+        else:
+            r = requests.get(
+                "https://api.alldebrid.com/v4/link/unlock",
+                params={"apikey": ALLDEBRID_API_TOKEN, "link": url}
+            )
+            data = r.json()
+
+            if data.get("status") == "success":
+                return ("supported", True)
+            elif data.get("error", {}).get("code") == "LINK_HOST_NOT_SUPPORTED":
+                return ("not_supported", None)
+            else:
+                return ("supported", False)
+
+    except Exception as e:
+        print(f"Error checking AllDebrid cache: {e}")
+        return ("not_supported", None)
+
 
 def check_premiumize_cache(url):
     if not PREMIUMIZE_API_TOKEN:
         return None
-    if is_magnet(url):
-        r = requests.get("https://www.premiumize.me/api/cache/check", params={"items[]": url, "apikey": PREMIUMIZE_API_TOKEN})
-        if r.status_code == 200:
+
+    try:
+        if is_magnet(url):
+            r = requests.get(
+                "https://www.premiumize.me/api/cache/check",
+                params={"items[]": url, "apikey": PREMIUMIZE_API_TOKEN}
+            )
             data = r.json()
             response = data.get("response")
             if isinstance(response, list) and response:
-                return response[0] is True
-        return False
-    else:
-        r = requests.get("https://www.premiumize.me/api/transfer/directdl", params={"apikey": PREMIUMIZE_API_TOKEN, "src": url})
-        return r.status_code == 200 and r.json().get("status") == "success"
+                return ("supported", response[0] is True)
+            return ("supported", False)
+
+        else:
+            r = requests.get(
+                "https://www.premiumize.me/api/transfer/directdl",
+                params={"apikey": PREMIUMIZE_API_TOKEN, "src": url}
+            )
+            data = r.json()
+
+            if data.get("status") == "success":
+                return ("supported", True)
+            elif data.get("message", "").lower().startswith("unsupported link"):
+                return ("not_supported", None)
+            else:
+                return ("supported", False)
+
+    except Exception as e:
+        print(f"Error checking Premiumize cache: {e}")
+        return ("not_supported", None)
+
 
 def extract_info_hash(magnet_link):
     match = re.search(r'btih:([a-fA-F0-9]+)', magnet_link)
@@ -1323,59 +1393,79 @@ def check_torbox_cache(url):
 
     headers = {"Authorization": f"Bearer {TORBOX_API_TOKEN}"}
 
-    if is_magnet(url):
-        info_hash = extract_info_hash(url)
-        if not info_hash:
-            return False
+    try:
+        if is_magnet(url):
+            info_hash = extract_info_hash(url)
+            if not info_hash:
+                return ("not_supported", None)
 
-        resp = requests.post(
-            "https://api.torbox.app/v1/api/torrents/checkcached",
-            json={"hashes": [info_hash]},
-            headers=headers,
-            timeout=10
-        )
+            resp = requests.post(
+                "https://api.torbox.app/v1/api/torrents/checkcached",
+                json={"hashes": [info_hash]},
+                headers=headers,
+                timeout=10
+            )
 
-        if resp.status_code == 200:
-            data = resp.json()
-            return info_hash in data.get("data", {})
-        return False
+            if resp.status_code == 200:
+                data = resp.json()
+                return ("supported", info_hash in data.get("data", {}))
+            else:
+                return ("not_supported", None)
 
-    else:
-        md5_hash = hashlib.md5(url.encode()).hexdigest()
+        else:
+            md5_hash = hashlib.md5(url.encode()).hexdigest()
 
-        resp = requests.post(
-            "https://api.torbox.app/v1/api/webdl/checkcached",
-            json={"hashes": [md5_hash]},  # ✅ compute hash of URL string
-            headers=headers,
-            timeout=10
-        )
+            resp = requests.post(
+                "https://api.torbox.app/v1/api/webdl/checkcached",
+                json={"hashes": [md5_hash]},
+                headers=headers,
+                timeout=10
+            )
 
-        if resp.status_code == 200:
-            data = resp.json()
-            return md5_hash in data.get("data", {})
-        return False
+            if resp.status_code == 200:
+                data = resp.json()
+                cached = md5_hash in data.get("data", {})
+                if cached:
+                    return ("supported", True)
+                else:
+                    return ("unknown", False)  # ✅ could be unsupported or just not cached
+            else:
+                return ("not_supported", None)
+
+    except Exception as e:
+        print(f"Error checking TorBox cache: {e}")
+        return ("not_supported", None)
+
 
 def find_best_debrid(url: str = None) -> list[str]:
     if not url:
         url = input("Paste your magnet or hoster URL: ").strip()
     print("Checking availability across services...")
     services = []
+
     if REAL_DEBRID_API_TOKEN:
-        cached = check_real_debrid_cache(url)
-        if cached is not None:
-            services.append(("Real-Debrid", cached))
+        status = check_real_debrid_cache(url)
+        if status:
+            support, cached = status
+            services.append(("Real-Debrid", support, cached))
+
     if ALLDEBRID_API_TOKEN:
-        cached = check_alldebrid_cache(url)
-        if cached is not None:
-            services.append(("AllDebrid", cached))
+        status = check_alldebrid_cache(url)
+        if status:
+            support, cached = status
+            services.append(("AllDebrid", support, cached))
+
     if PREMIUMIZE_API_TOKEN:
-        cached = check_premiumize_cache(url)
-        if cached is not None:
-            services.append(("Premiumize.me", cached))
+        status = check_premiumize_cache(url)
+        if status:
+            support, cached = status
+            services.append(("Premiumize.me", support, cached))
+
     if TORBOX_API_TOKEN:
-        cached = check_torbox_cache(url)
-        if cached is not None:
-            services.append(("Torbox", cached)) 
+        status = check_torbox_cache(url)
+        if status:
+            support, cached = status
+            services.append(("Torbox", support, cached))
 
     if not services:
         print("No debrid services available or none support this URL.")
@@ -1383,8 +1473,13 @@ def find_best_debrid(url: str = None) -> list[str]:
 
     print()
     print(f"{CYAN}Available options:{RESET}")
-    for idx, (name, cached) in enumerate(services, 1):
-        status = f"{GREEN}Cached{RESET}" if cached else f"{RED}Not Cached{RESET}"
+    for idx, (name, support, cached) in enumerate(services, 1):
+        if support == "not_supported":
+            status = f"{RED}Not Supported{RESET}"
+        elif support == "unknown":
+            status = f"{YELLOW}Not Cached | Support unknown{RESET}"
+        else:
+            status = f"{GREEN}Cached{RESET}" if cached else f"{YELLOW}Not Cached{RESET}"
         print(f"{YELLOW}{idx}{RESET}. {name} ({status})")
 
     choice = input("Choose a service: ")
@@ -1405,6 +1500,7 @@ def find_best_debrid(url: str = None) -> list[str]:
         return get_torbox_links(url)
     return []
 
+
 def list_container_files():
     files = [f for f in os.listdir('.') if os.path.isfile(f) and (f.endswith('.torrent') or f.endswith('.nzb'))]
     return files
@@ -1415,7 +1511,8 @@ def main():
     print(f"{CYAN}Do you want to:{RESET}")
     print(f"{YELLOW}1{RESET}. Load URLs from a file")
     print(f"{YELLOW}2{RESET}. Paste URLs manually")
-    print(f"{YELLOW}3{RESET}. Use Debrid Service")
+    if REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or PREMIUMIZE_API_TOKEN or TORBOX_API_TOKEN:
+        print(f"{YELLOW}3{RESET}. Use Debrid Service")
     choice = input("Enter 1, 2 or 3: ").strip()
 
     if choice == '1':
@@ -1426,7 +1523,8 @@ def main():
         print()
         print(f"{CYAN}What do you want to do?{RESET}")
         print(f"{YELLOW}1{RESET}. Add Magnet or URL")
-        print(f"{YELLOW}2{RESET}. Upload Container File (.torrent or .nzb)")
+        if PREMIUMIZE_API_TOKEN or TORBOX_API_TOKEN:
+            print(f"{YELLOW}2{RESET}. Upload Container File (.torrent or .nzb)")
         submode = input("Enter 1 or 2: ").strip()
         if submode not in ("1", "2"):
             print(f"{RED}Invalid choice.{RESET}")
