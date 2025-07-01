@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ---
+## [v1.4.0] - c3cc6d3
+### Added
+- Check if hosters are supported
+- Don't show option that can't be used if certain API Keys are not set
 
 ## [v1.3.0] - 0eb8ee7
 ### Added
