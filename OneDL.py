@@ -33,8 +33,10 @@ import requests
 import json
 import re
 import bencodepy
+import base64
+import struct
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -264,9 +266,9 @@ def get_real_debrid_links(url=None):
                 if info["status"] != "downloading":
                     print()  # Print newline after progress bar when done
                 time.sleep(3)
-    elif "mega.nz/folder/" in url and "/file/" not in url and PREMIUMIZE_API_TOKEN:
+    elif "mega.nz/folder/" in url and "/file/" not in url:
         # Extract file links from folder
-        file_links = extract_mega_file_links_with_premiumize(url)
+        file_links = extract_mega_files_from_folder(url)
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
@@ -439,9 +441,9 @@ def get_alldebrid_links(url=None):
             else:
                 print(f"{YELLOW}Waiting for AllDebrid...{RESET}")
                 time.sleep(3)
-    elif "mega.nz/folder/" in url and "/file/" not in url and PREMIUMIZE_API_TOKEN:
-        # Extract file links from folder using Premiumize
-        file_links = extract_mega_file_links_with_premiumize(url)
+    elif "mega.nz/folder/" in url and "/file/" not in url:
+        # Extract file links from folder
+        file_links = extract_mega_files_from_folder(url)
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
@@ -733,9 +735,9 @@ def get_torbox_links(url=None):
             print(f"{RED}No files could be downloaded at this time.{RESET}")
 
         return links
-    elif "mega.nz/folder/" in url and "/file/" not in url and PREMIUMIZE_API_TOKEN:
-        # Extract file links from folder using Premiumize
-        file_links = extract_mega_file_links_with_premiumize(url)
+    elif "mega.nz/folder/" in url and "/file/" not in url:
+        # Extract file links from folder
+        file_links = extract_mega_files_from_folder(url)
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
@@ -1117,21 +1119,30 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
 
         # Now query mylist to get all file entries
         print(f"{CYAN}Getting download info for Usenet ID {usenet_id}...{RESET}")
-        mylist_resp = requests.get(
-            "https://api.torbox.app/v1/api/usenet/mylist",
-            params={"token": TORBOX_API_TOKEN, "id": usenet_id},
-            headers=headers,
-            timeout=30
-        )
 
-        if mylist_resp.status_code != 200 or not mylist_resp.json().get("success"):
-            print(f"{RED}Failed to query mylist for NZB.{RESET}")
-            return []
+        # Retry fetching file list up to 5 times with a delay
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            mylist_resp = requests.get(
+                "https://api.torbox.app/v1/api/usenet/mylist",
+                params={"token": TORBOX_API_TOKEN, "id": usenet_id},
+                headers=headers,
+                timeout=30
+            )
 
-        mylist_data = mylist_resp.json().get("data", {})
-        files = mylist_data.get("files", [])
-        if not files:
-            print(f"{RED}No files found in mylist response.{RESET}")
+            if mylist_resp.status_code == 200 and mylist_resp.json().get("success"):
+                mylist_data = mylist_resp.json().get("data", {})
+                files = mylist_data.get("files", [])
+                if files:
+                    break
+                else:
+                    print(f"{YELLOW}No files found yet, retrying ({attempt}/{max_retries})...{RESET}")
+            else:
+                print(f"{RED}Failed to query mylist for NZB (attempt {attempt}/{max_retries}).{RESET}")
+
+            time.sleep(3)
+        else:
+            print(f"{RED}No files found in mylist response after {max_retries} attempts.{RESET}")
             return []
 
         print(f"{GREEN}Found {len(files)} file(s).{RESET}")
@@ -1211,7 +1222,46 @@ def get_all_files_with_links(token, folder_id):
                 })
 
     recurse(folder_id)
-    return files
+    return files    
+
+def base64_url_decode(s):
+    s = s.replace('-', '+').replace('_', '/')
+    return base64.b64decode(s + '=' * ((4 - len(s) % 4) % 4))
+
+def aar_to_ints(a32):
+    return struct.unpack('>' + 'I'*(len(a32)//4), a32)
+
+def extract_mega_files_from_folder(folder_url: str) -> list[str]:
+    match = re.search(r"mega\.nz/folder/([a-zA-Z0-9_-]+)#([a-zA-Z0-9_-]+)", folder_url)
+    if not match:
+        print("Invalid MEGA folder URL")
+        return []
+    
+    folder_id, key = match.group(1), match.group(2)
+    try:
+        resp = requests.post(
+            "https://g.api.mega.co.nz/cs",
+            params={"id": 0, "n": folder_id},
+            json=[{"a": "f", "c": 1, "r": 1}]
+        )
+        files = resp.json()[0].get("f", [])
+        urls = []
+
+        for file in files:
+            if file.get("t") == 0:  # regular file, not folder
+                file_id = file.get("h")
+                if file_id:
+                    file_url = f"https://mega.nz/folder/{folder_id}#{key}/file/{file_id}"
+                    urls.append(file_url)
+        return urls
+
+    except Exception as e:
+        print(f"{RED}Error fetching MEGA folder via API: {e}{RESET}")
+        if PREMIUMIZE_API_TOKEN:
+            print(f"{YELLOW}Falling back to Premiumize...{RESET}")
+            return extract_mega_file_links_with_premiumize(folder_url)
+        else:
+            return []
 
 def extract_mega_file_links_with_premiumize(folder_url):
     token = PREMIUMIZE_API_TOKEN
