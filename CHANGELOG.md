@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 ---
+## [v1.5.0] - 39e6993
+### Added
+- Feat: Allow to select file ranges as well as individual files
+- Feat: Add file selection when downloading from mega folders
+### Fixed
+- Fix: Send mega folder to TorBox instead of file by file
+- Fix: Downloads with multiple files on TorBox was only downloading the first file
+- Fix: Improve findig if hoster is supported on real debrid
+
 ## [v1.4.0] - c3cc6d3
 ### Added
 - Check if hosters are supported
