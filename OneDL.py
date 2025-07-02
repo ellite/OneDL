@@ -33,10 +33,8 @@ import requests
 import json
 import re
 import bencodepy
-import base64
-import struct
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -94,7 +92,6 @@ def get_urls_from_input():
 
 def show_progress_factory():
     start_time = [time.time()]
-    last_downloaded = [0]
 
     def show_progress(block_num, block_size, total_size):
         downloaded = block_num * block_size
@@ -176,6 +173,23 @@ def torrent_to_magnet(filepath):
 def is_magnet(url):
     return url.strip().startswith("magnet:")
 
+def parse_selection(selection_input, max_index):
+    selection = set()
+    for part in selection_input.split(","):
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                if start <= end and 1 <= start <= max_index and 1 <= end <= max_index:
+                    selection.update(range(start, end + 1))
+            except ValueError:
+                continue
+        elif part.isdigit():
+            idx = int(part)
+            if 1 <= idx <= max_index:
+                selection.add(idx)
+    return sorted(selection)    
+
 def get_real_debrid_links(url=None):
     token = REAL_DEBRID_API_TOKEN
     while not url:
@@ -206,11 +220,14 @@ def get_real_debrid_links(url=None):
                     for idx, f in enumerate(files, 1):
                         path = f['path'].lstrip("/\\")
                         print(f"{YELLOW}{idx}{RESET}: {path} {CYAN}({f['bytes']//1024//1024} MB){RESET}")
-                    selection = input(f"Enter numbers separated by commas, or 'all' (default all): ")
-                    if selection.strip().lower() == "all" or not selection.strip():
+
+                    selection = input(f"Enter numbers (e.g., 1,2,5-10) or 'all' (default all): ").strip().lower()
+                    if selection == "all" or not selection:
                         file_ids = [str(f["id"]) for f in files]
                     else:
-                        file_ids = [str(files[int(i)-1]["id"]) for i in selection.split(",") if i.strip().isdigit()]
+                        selected_indices = parse_selection(selection, len(files))
+                        file_ids = [str(files[i - 1]["id"]) for i in selected_indices]
+
                     requests.post(
                         f"https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}",
                         data={"files": ",".join(file_ids)},
@@ -272,6 +289,9 @@ def get_real_debrid_links(url=None):
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
+        
+        print()
+        print(f"{YELLOW}Unlocking files...{RESET}")
         unlocked = []
         for f in file_links:
             resp = requests.post(
@@ -281,11 +301,27 @@ def get_real_debrid_links(url=None):
             )
             data = resp.json()
             if "download" in data:
-                print(f"{GREEN}Unlocked:{RESET} {YELLOW}{f}{RESET} {CYAN}→{RESET} {GREEN}{data['download']}{RESET}")
-                unlocked.append(data["download"])
+                filename = data.get("filename") or urllib.parse.unquote(f.split("/")[-1])
+                unlocked.append({"name": filename, "url": data["download"]})
             else:
                 print(f"{RED}Could not unlock:{RESET} {YELLOW}{f}{RESET}")
-        return unlocked
+
+        if not unlocked:
+            print(f"{RED}No files were unlocked.{RESET}")
+            return []
+
+        # Prompt user for selection
+        print(f"{CYAN}Select files to download:{RESET}")
+        for idx, f in enumerate(unlocked, 1):
+            print(f"{YELLOW}{idx}{RESET}: {f['name']}")
+
+        selection = input(f"Enter numbers separated by commas or ranges (e.g., 1,3-5), or press Enter for all: ").strip()
+        if not selection or selection.lower() == "all":
+            return [f["url"] for f in unlocked]
+
+        selected_indices = parse_selection(selection, len(unlocked))
+        return [unlocked[i - 1]["url"] for i in selected_indices]
+
     else:
         # Hoster logic as before
         resp = requests.post(
@@ -447,6 +483,8 @@ def get_alldebrid_links(url=None):
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
+        print()
+        print(f"{YELLOW}Unlocking files...{RESET}")
         unlocked = []
         for f in file_links:
             resp = requests.get(
@@ -455,11 +493,27 @@ def get_alldebrid_links(url=None):
             )
             data = resp.json()
             if data.get("status") == "success" and "link" in data.get("data", {}):
-                print(f"{GREEN}Unlocked:{RESET} {YELLOW}{f}{RESET} {CYAN}→{RESET} {GREEN}{data['data']['link']}{RESET}")
-                unlocked.append(data["data"]["link"])
+                filename = data["data"].get("filename") or urllib.parse.unquote(f.split("/")[-1])
+                unlocked.append({"name": filename, "url": data["data"]["link"]})
             else:
                 print(f"{RED}Could not unlock:{RESET} {YELLOW}{f}{RESET}")
-        return unlocked
+
+        if not unlocked:
+            print(f"{RED}No files were unlocked.{RESET}")
+            return []
+
+        # Prompt user to select which files to download
+        print(f"{CYAN}Select files to download:{RESET}")
+        for idx, f in enumerate(unlocked, 1):
+            print(f"{YELLOW}{idx}{RESET}: {f['name']}")
+
+        selection = input(f"Enter numbers separated by commas or ranges (e.g., 1,3-5), or press Enter for all: ").strip()
+        if not selection or selection.lower() == "all":
+            return [f["url"] for f in unlocked]
+
+        selected_indices = parse_selection(selection, len(unlocked))
+        return [unlocked[i - 1]["url"] for i in selected_indices]
+
     else:
         # Hoster logic
         resp = requests.get(
@@ -735,27 +789,6 @@ def get_torbox_links(url=None):
             print(f"{RED}No files could be downloaded at this time.{RESET}")
 
         return links
-    elif "mega.nz/folder/" in url and "/file/" not in url:
-        # Extract file links from folder
-        file_links = extract_mega_files_from_folder(url)
-        if not file_links:
-            print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
-            return []
-        unlocked = []
-        for f in file_links:
-            resp = requests.post(
-                "https://api.torbox.app/v1/api/webdl/unrestrict",
-                json={"link": f},
-                headers=headers,
-                timeout=10
-            )
-            data = resp.json()
-            if data.get("success") and "download" in data.get("data", {}):
-                print(f"{GREEN}Unlocked:{RESET} {YELLOW}{f}{RESET} {CYAN}→{RESET} {GREEN}{data['data']['download']}{RESET}")
-                unlocked.append(data["data"]["download"])
-            else:
-                print(f"{RED}Could not unlock:{RESET} {YELLOW}{f}{RESET}")
-        return unlocked
     
     else:
         # Hoster logic
@@ -772,145 +805,97 @@ def get_torbox_links(url=None):
             return []
 
         cached_data = check_resp.json().get("data", {})
-        if md5_hash not in cached_data:
-            print(f"{YELLOW}Not cached on Torbox, creating download job...{RESET}")
-            create_resp = requests.post(
-                "https://api.torbox.app/v1/api/webdl/createwebdownload",
-                data={"link": url},
-                headers=headers,
-                timeout=30
-            )
+        is_cached = md5_hash in cached_data
 
-            if create_resp.status_code != 200 or not create_resp.json().get("success"):
-                print(f"{RED}Failed to create web download job.{RESET}")
-                return []
+        print(f"{GREEN}Found cached web download. Creating job to retrieve file list...{RESET}" if is_cached else f"{YELLOW}Not cached. Creating new job...{RESET}")
 
-            data = create_resp.json().get("data", {})
-            web_id = data.get("webdownload_id")
-            if not web_id:
-                print(f"{RED}Job created but no webdownload_id returned.{RESET}")
-                return []
+        create_resp = requests.post(
+            "https://api.torbox.app/v1/api/webdl/createwebdownload",
+            data={"link": url},
+            headers=headers,
+            timeout=30
+        )
 
-            print(f"{GREEN}Created download job with ID {web_id}. {RESET}")
-            last_state = None
-            printed_progress = False
+        if create_resp.status_code != 200 or not create_resp.json().get("success"):
+            print(f"{RED}Failed to create web download job.{RESET}")
+            return []
 
-            while True:
-                mylist_resp = requests.get(
-                    "https://api.torbox.app/v1/api/webdl/mylist",
-                    params={"token": TORBOX_API_TOKEN},
-                    headers=headers,
-                    timeout=30
-                )
-                if mylist_resp.status_code != 200 or not mylist_resp.json().get("success"):
-                    print(f"{RED}Failed to retrieve webdl mylist.{RESET}")
-                    return []
+        data = create_resp.json().get("data", {})
+        web_id = data.get("webdownload_id")
+        if not web_id:
+            print(f"{RED}Job created but no webdownload_id returned.{RESET}")
+            return []
 
-                entries = mylist_resp.json().get("data", [])
-                entry = next((e for e in entries if e.get("id") == web_id), None)
-                if not entry:
-                    print(f"{RED}Web download entry not found in list.{RESET}")
-                    return []
+        print(f"{CYAN}Resolved web_id:{RESET} {web_id}")
 
-                state = entry.get("download_state")
-                progress = entry.get("progress", 0.0)
-                speed = entry.get("download_speed", 0)
+        # Get full file list
+        mylist_resp = requests.get(
+            "https://api.torbox.app/v1/api/webdl/mylist",
+            params={"token": TORBOX_API_TOKEN, "id": web_id},
+            headers=headers,
+            timeout=30
+        )
 
-                if state != last_state:
-                    readable_state = state.capitalize() if state else "Unknown"
-                    print(f"{CYAN}State: {readable_state}{RESET}")
-                    last_state = state
+        mylist_data = mylist_resp.json()
+        data = mylist_data.get("data", {})
+        files = data.get("files", [])
 
-                    # Once we leave 'downloading', print a 100% bar only once
-                    if state != "downloading" and not printed_progress:
-                        sys.stdout.write(
-                            f"{YELLOW}Downloading to cloud...{RESET} ["
-                            + "#" * 30 +
-                            f"] 100% :: {CYAN}{speed / (1024 * 1024):.2f} MB/s{RESET}\n"
-                        )
-                        sys.stdout.flush()
-                        printed_progress = True
+        if not files:
+            print(f"{RED}No downloadable files listed.{RESET}")
+            return []
 
-                if state == "downloading" and not printed_progress:
-                    bar_len = 30
-                    bar = "#" * int(progress * bar_len)
-                    bar = bar.ljust(bar_len)
-                    percent = int(progress * 100)
-                    speed_mb = f"{speed / (1024 * 1024):.2f} MB/s" if speed else "–"
+        print(f"{GREEN}Found {len(files)} file(s).{RESET}")
+        for idx, f in enumerate(files, 1):
+            name = f.get("short_name", "Unknown")
+            size = f.get("size", 0)
+            mb = size // (1024 * 1024)
+            print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
 
-                    sys.stdout.write(
-                        f"\r{YELLOW}Downloading to cloud...{RESET} [{bar}] {GREEN}{percent}%{RESET} :: {CYAN}{speed_mb}{RESET}   "
-                    )
-                    sys.stdout.flush()
+        choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g., 1,3-5), or 'all' [default=all]:{RESET} ").strip()
 
-                if state == "completed":
-                    print()
-                    break
-                elif state == "error":
-                    print(f"{RED}Download failed on Torbox side.{RESET}")
-                    return []
-
-                time.sleep(5)
-
-            # Now request the download
-            req_resp = requests.get(
-                "https://api.torbox.app/v1/api/webdl/requestdl",
-                params={"token": TORBOX_API_TOKEN, "web_id": web_id},
-                headers=headers,
-                timeout=10
-            )
-
-            if req_resp.status_code == 200 and req_resp.json().get("success"):
-                download_url = req_resp.json().get("data")
-                if download_url:
-                    print(f"{GREEN}Resolved direct link:{RESET}\n{YELLOW}{download_url}{RESET}")
-                    return [download_url]
-                else:
-                    print(f"{RED}No download URL returned from requestdl.{RESET}")
-                    return []
-            else:
-                print(f"{RED}Failed to request direct download link.{RESET}")
-                return []
-
+        if not choice or choice.lower() == "all":
+            selected_indexes = set(range(len(files)))
         else:
-            print(f"{GREEN}Found cached web download. Adding it to your list...{RESET}")
+            selected_indexes = set()
+            for part in choice.split(","):
+                part = part.strip()
+                if '-' in part:
+                    try:
+                        start, end = map(int, part.split('-'))
+                        selected_indexes.update(range(start - 1, end))
+                    except Exception:
+                        continue
+                elif part.isdigit():
+                    i = int(part)
+                    if 1 <= i <= len(files):
+                        selected_indexes.add(i - 1)
 
-            create_resp = requests.post(
-                "https://api.torbox.app/v1/api/webdl/createwebdownload",
-                data={"link": url},
-                headers=headers,
-                timeout=30
-            )
-            if create_resp.status_code != 200 or not create_resp.json().get("success"):
-                print(f"{RED}Failed to create web download job for cached URL.{RESET}")
-                return []
+        print(f"{GREEN}Requesting download links...{RESET}")
+        urls = []
+        for idx in sorted(selected_indexes):
+            f = files[idx]
+            fid = f.get("id")
+            name = f.get("short_name", "Unknown")
 
-            data = create_resp.json().get("data", {})
-            web_id_value = data.get("webdownload_id")
-            if not web_id_value:
-                print(f"{RED}Job created but no webdownload_id returned.{RESET}")
-                return []
-
-            print(f"{CYAN}Resolved web_id:{RESET} {web_id_value}")
-
-            req_resp = requests.get(
+            dl_resp = requests.get(
                 "https://api.torbox.app/v1/api/webdl/requestdl",
-                params={"token": TORBOX_API_TOKEN, "web_id": web_id_value},
+                params={"token": TORBOX_API_TOKEN, "web_id": web_id, "file_id": fid},
                 headers=headers,
                 timeout=10
             )
 
-            if req_resp.status_code == 200 and req_resp.json().get("success"):
-                download_url = req_resp.json().get("data")
-                if download_url:
-                    print(f"{YELLOW}{download_url}{RESET}")
-                    return [download_url]
+            if dl_resp.status_code == 200 and dl_resp.json().get("success"):
+                url = dl_resp.json().get("data")
+                if url:
+                    print(f"{YELLOW}{name}:{RESET} {url}")
+                    urls.append(url)
                 else:
-                    print(f"{RED}No download URL returned from requestdl.{RESET}")
-                    return []
+                    print(f"{RED}No URL for {name}.{RESET}")
             else:
-                print(f"{RED}Failed to request direct download link.{RESET}")
-                return []
+                print(f"{RED}Failed to get download for {name}.{RESET}")
+
+        return urls
+
 
 def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
     from pathlib import Path
@@ -1023,18 +1008,13 @@ def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
                 mb = size // (1024 * 1024)
                 print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
 
-            choice = input(f"{CYAN}Enter file numbers separated by commas, or 'all' (default all):{RESET} ").strip()
+            choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g. 1,3-5), or 'all' (default all):{RESET} ").strip()
             if not choice or choice.lower() == "all":
-                selected_indexes = set(range(len(content)))
+                selected_indexes = list(range(len(content)))
             else:
-                try:
-                    selected_indexes = set(
-                        int(i.strip()) - 1
-                        for i in choice.split(",")
-                        if i.strip().isdigit() and 0 < int(i.strip()) <= len(content)
-                    )
-                except Exception as e:
-                    print(f"{RED}Invalid selection: {e}{RESET}")
+                selected_indexes = parse_selection(choice, len(content))
+                if not selected_indexes:
+                    print(f"{RED}No valid file indexes selected.{RESET}")
                     return []
 
             return [content[i]["link"] for i in selected_indexes if content[i].get("link")]
@@ -1068,21 +1048,17 @@ def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
                 mb = size // (1024 * 1024)
                 print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
 
-            choice = input(f"{CYAN}Enter file numbers separated by commas, or 'all' (default all):{RESET} ").strip()
+            choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g. 1,3-5), or 'all' (default all):{RESET} ").strip()
             if not choice or choice.lower() == "all":
-                selected_indexes = set(range(len(files)))
+                selected_indexes = list(range(len(files)))
             else:
-                try:
-                    selected_indexes = set(
-                        int(i.strip()) - 1
-                        for i in choice.split(",")
-                        if i.strip().isdigit() and 0 < int(i.strip()) <= len(files)
-                    )
-                except Exception as e:
-                    print(f"{RED}Invalid selection: {e}{RESET}")
+                selected_indexes = parse_selection(choice, len(files))
+                if not selected_indexes:
+                    print(f"{RED}No valid file indexes selected.{RESET}")
                     return []
 
             return [files[i]["link"] for i in selected_indexes]
+
 
     except Exception as e:
         print(f"{RED}Exception during Premiumize NZB processing: {e}{RESET}")
@@ -1153,18 +1129,13 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
             print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
 
         # Prompt user for selection
-        choice = input(f"{CYAN}Enter file numbers separated by commas, or 'all' (default all):{RESET} ").strip()
+        choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g. 1,3-5), or 'all' (default all):{RESET} ").strip()
         if not choice or choice.lower() == "all":
-            selected_indexes = set(range(len(files)))
+            selected_indexes = list(range(len(files)))
         else:
-            try:
-                selected_indexes = set(
-                    int(i.strip()) - 1
-                    for i in choice.split(",")
-                    if i.strip().isdigit() and 0 < int(i.strip()) <= len(files)
-                )
-            except Exception as e:
-                print(f"{RED}Invalid selection: {e}{RESET}")
+            selected_indexes = parse_selection(choice, len(files))
+            if not selected_indexes:
+                print(f"{RED}No valid file indexes selected.{RESET}")
                 return []
 
         print(f"{GREEN}Requesting download links...{RESET}")
@@ -1223,13 +1194,6 @@ def get_all_files_with_links(token, folder_id):
 
     recurse(folder_id)
     return files    
-
-def base64_url_decode(s):
-    s = s.replace('-', '+').replace('_', '/')
-    return base64.b64decode(s + '=' * ((4 - len(s) % 4) % 4))
-
-def aar_to_ints(a32):
-    return struct.unpack('>' + 'I'*(len(a32)//4), a32)
 
 def extract_mega_files_from_folder(folder_url: str) -> list[str]:
     match = re.search(r"mega\.nz/folder/([a-zA-Z0-9_-]+)#([a-zA-Z0-9_-]+)", folder_url)
@@ -1301,7 +1265,7 @@ def check_real_debrid_cache(url):
             )
             data = resp.json()
             if resp.status_code != 200:
-                if isinstance(data, dict) and data.get("error") == "hoster_unsupported":
+                if isinstance(data, dict) and (data.get("error") == "hoster_unsupported" or data.get("error") == "hoster_unavailable"):
                     return ("not_supported", None)
                 return ("supported", False)
             return ("supported", "download" in data)
@@ -1414,7 +1378,6 @@ def check_torbox_cache(url):
 
         else:
             md5_hash = hashlib.md5(url.encode()).hexdigest()
-
             resp = requests.post(
                 "https://api.torbox.app/v1/api/webdl/checkcached",
                 json={"hashes": [md5_hash]},
