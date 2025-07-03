@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ---
+## [v1.510] - df63d71
+### Fixed
+- Wait for cloud download to finish to retrieve hoster files on TorBox
+
 ## [v1.5.0] - 39e6993
 ### Added
 - Feat: Allow to select file ranges as well as individual files
