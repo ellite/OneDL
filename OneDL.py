@@ -34,7 +34,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -829,6 +829,7 @@ def get_torbox_links(url=None):
         print(f"{CYAN}Resolved web_id:{RESET} {web_id}")
 
         # Get full file list
+        # First status check
         mylist_resp = requests.get(
             "https://api.torbox.app/v1/api/webdl/mylist",
             params={"token": TORBOX_API_TOKEN, "id": web_id},
@@ -837,12 +838,64 @@ def get_torbox_links(url=None):
         )
 
         mylist_data = mylist_resp.json()
+        if not mylist_data.get("success"):
+            print(f"{RED}Failed to retrieve job status from mylist.{RESET}")
+            return []
+
         data = mylist_data.get("data", {})
+        state = data.get("download_state")
+        progress = data.get("progress", 0.0)
+        speed = data.get("download_speed", 0)
         files = data.get("files", [])
 
+                # These states mean "not ready yet"
+        pending_states = {"downloading", "processing", "waiting"}
+        last_state = state
+
+        if state in pending_states and not files:
+            print(f"{CYAN}Waiting for cloud download to finish...{RESET}")
+
+            while state in pending_states:
+                bar_len = 30
+                bar = "#" * int(progress * bar_len)
+                bar = bar.ljust(bar_len)
+                percent = int(progress * 100)
+                speed_mb = f"{speed / (1024 * 1024):.2f} MB/s" if speed else "–"
+
+                sys.stdout.write(
+                    f"\r{YELLOW}Downloading to cloud...{RESET} [{bar}] {GREEN}{percent}%{RESET} :: {CYAN}{speed_mb}{RESET}   "
+                )
+                sys.stdout.flush()
+
+                time.sleep(5)
+
+                # Re-check status
+                mylist_resp = requests.get(
+                    "https://api.torbox.app/v1/api/webdl/mylist",
+                    params={"token": TORBOX_API_TOKEN, "id": web_id},
+                    headers=headers,
+                    timeout=30
+                )
+                mylist_data = mylist_resp.json()
+                data = mylist_data.get("data", {})
+                state = data.get("download_state")
+                progress = data.get("progress", 0.0)
+                speed = data.get("download_speed", 0)
+
+            print()  # Newline after progress bar
+
+            if state != "completed":
+                print(f"{RED}Download failed or is still not ready. Final state: {state}{RESET}")
+                return []
+
+            files = data.get("files", [])
+
+
+        # Final check for file list
         if not files:
             print(f"{RED}No downloadable files listed.{RESET}")
             return []
+
 
         print(f"{GREEN}Found {len(files)} file(s).{RESET}")
         for idx, f in enumerate(files, 1):
@@ -1097,7 +1150,7 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
         print(f"{CYAN}Getting download info for Usenet ID {usenet_id}...{RESET}")
 
         # Retry fetching file list up to 5 times with a delay
-        max_retries = 5
+        max_retries = 10
         for attempt in range(1, max_retries + 1):
             mylist_resp = requests.get(
                 "https://api.torbox.app/v1/api/usenet/mylist",
