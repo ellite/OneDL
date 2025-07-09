@@ -39,7 +39,7 @@ If it's not installed, download it from [python.org](https://www.python.org/down
 
 ### 2. Install Required Package
 
-The only required external Python package is `requests`. Install it with:
+The only required external Python packages are `requests` and `bencodepy`. Install them with:
 
 ```bash
 pip install requests bencodepy
