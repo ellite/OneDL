@@ -120,7 +120,7 @@ def show_progress_factory():
 def download_file(url, filename=None):
     try:
         # Follow redirects to get the real file and filename
-        with requests.get(url, stream=True, allow_redirects=True) as r:
+        with requests.get(url, stream=True, allow_redirects=True, timeout=5) as r:
             r.raise_for_status()
             # Only override filename if not given
             if filename is None:
