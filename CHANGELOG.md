@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ---
-## [v1.510] - df63d71
+## [v1.5.1] - df63d71
 ### Fixed
 - Wait for cloud download to finish to retrieve hoster files on TorBox
 
