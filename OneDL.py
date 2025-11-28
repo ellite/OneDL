@@ -34,7 +34,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -47,13 +47,16 @@ GREEN = "\033[92m"
 RED = "\033[91m"
 RESET = "\033[0m"
 
+
 def list_files():
     files = [f for f in os.listdir('.') if os.path.isfile(f)]
     return files
 
+
 def list_text_files():
     files = [f for f in os.listdir('.') if os.path.isfile(f) and f.endswith('.txt')]
     return files
+
 
 def get_urls_from_file():
     files = list_files()
@@ -65,19 +68,36 @@ def get_urls_from_file():
     print(f"{CYAN}Select a file to load URLs from:{RESET}")
     for idx, f in enumerate(files, 1):
         print(f"{YELLOW}{idx}{RESET}: {f}")
+
     while True:
         choice = input(f"Enter the number of the file: ")
         if choice.isdigit() and 1 <= int(choice) <= len(files):
             filename = files[int(choice) - 1]
             try:
                 with open(filename, 'r') as file:
-                    urls = [line.strip() for line in file if line.strip()]
-                return urls
+                    # 1. Read all non-empty lines
+                    all_urls = [line.strip() for line in file if line.strip()]
+
+                if not all_urls:
+                    print(f"{RED}File is empty.{RESET}")
+                    return []
+
+                print(f"{GREEN}Loaded {len(all_urls)} URLs from '{filename}'.{RESET}")
+
+                selected_indexes = select_files_interactive(all_urls, "Select URLs to download")
+
+                final_urls = [all_urls[i] for i in selected_indexes]
+                
+                print(f"{GREEN}Selected {len(final_urls)} URLs.{RESET}")
+                return final_urls
+
             except Exception as e:
                 print(f"{RED}Could not read file '{filename}': {e}{RESET}")
                 print(f"{YELLOW}Please select a different file.{RESET}")
                 continue
+        
         print(f"{RED}Invalid choice, try again.{RESET}")
+
 
 def get_urls_from_input():
     print()
@@ -89,6 +109,45 @@ def get_urls_from_input():
             break
         urls.append(line.strip())
     return urls
+
+def select_files_interactive(files, prompt="Enter selection"):
+    """
+    Unified selection handler for all debrid providers.
+    
+    files: list of dicts or strings (anything indexable)
+    prompt: custom prompt string
+    
+    Returns: list of 0-based indexes
+    """
+    max_index = len(files)
+
+    print(f"{CYAN}{prompt}:{RESET}")
+    for idx, f in enumerate(files, 1):
+        if isinstance(f, dict):
+            name = f.get("name") or f.get("short_name") or f.get("path") or str(f)
+        else:
+            name = str(f)
+        size = f.get("size") if isinstance(f, dict) else None
+        if size:
+            mb = size // (1024 * 1024)
+            print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
+        else:
+            print(f"{YELLOW}{idx}{RESET}: {name}")
+
+    choice = input(
+        f"{CYAN}Enter numbers, commas, ranges (e.g. 1,3-5) or 'all' (default all): {RESET}"
+    ).strip()
+
+    # Default = all
+    if not choice or choice.lower() == "all":
+        return list(range(max_index))
+
+    # Use your existing range parser
+    raw = parse_selection(choice, max_index)
+
+    selected = [i - 1 for i in raw if 1 <= i <= max_index]
+
+    return selected
 
 def show_progress_factory():
     start_time = [time.time()]
@@ -113,24 +172,29 @@ def show_progress_factory():
         sys.stdout.write(f"\r[{bar_colored}] {GREEN}{percent}%{RESET} {YELLOW}::{RESET} {speed_str} {YELLOW}::{RESET} {elapsed_str}")
         sys.stdout.flush()
         if downloaded >= total_size:
-            print()  # Newline after completion
+            print()
 
     return show_progress
 
+
 def download_file(url, filename=None):
+    def human_readable_size(num):
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if num < 1024:
+                return f"{num:.2f} {unit}"
+            num /= 1024
+        return f"{num:.2f} PB"
+
     try:
-        # Follow redirects to get the real file and filename
-        with requests.get(url, stream=True, allow_redirects=True, timeout=5) as r:
+        with requests.get(url, stream=True, allow_redirects=True) as r:
             r.raise_for_status()
-            # Only override filename if not given
+
             if filename is None:
-                # Try to get filename from Content-Disposition
                 cd = r.headers.get('content-disposition')
                 if cd:
                     fname = re.findall('filename="(.+)"', cd)
                     filename = fname[0] if fname else url.split("/")[-1]
                 else:
-                    # Fallback: use last part of final URL
                     filename = r.url.split("/")[-1]
             else:
                 cd = r.headers.get('content-disposition')
@@ -138,22 +202,61 @@ def download_file(url, filename=None):
                     fname = re.findall('filename="(.+)"', cd)
                     filename = fname[0] if fname else url.split("/")[-1]
                 else:
-                    # Fallback: use last part of final URL
                     filename = r.url.split("/")[-1]
-            filename = urllib.parse.unquote(filename)    
-            print(f"Downloading: {YELLOW}{filename}{RESET}")
-            show_progress = show_progress_factory()
+
+            filename = urllib.parse.unquote(filename)
+            total_size = int(r.headers.get('content-length', 0))
+            total_human = human_readable_size(total_size)
+
+            print(f"Downloading: {YELLOW}{filename}{RESET} ({CYAN}{total_human}{RESET})")
+
+            start_time = time.time()
+            downloaded = 0
+            block_size = 8192
+
             with open(filename, "wb") as f:
-                downloaded = 0
-                block_size = 8192
-                total_size = int(r.headers.get('content-length', 0))
-                for block_num, chunk in enumerate(r.iter_content(block_size), 1):
-                    if chunk:
-                        f.write(chunk)
-                        show_progress(block_num, block_size, total_size)
+                for chunk in r.iter_content(block_size):
+                    if not chunk:
+                        continue
+
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    elapsed = time.time() - start_time
+                    speed = downloaded / elapsed if elapsed > 0 else 0
+
+                    percent = int(downloaded * 100 / total_size) if total_size else 0
+                    bar_length = 50
+                    filled = percent * bar_length // 100
+                    bar = "#" * filled + " " * (bar_length - filled)
+
+                    # Convert speed
+                    if speed >= 1024 * 1024:
+                        speed_str = f"{speed/1024/1024:.2f} MB/s"
+                    elif speed >= 1024:
+                        speed_str = f"{speed/1024:.1f} KB/s"
+                    else:
+                        speed_str = f"{speed:.0f} B/s"
+
+                    elapsed_str = time.strftime("%M:%S", time.gmtime(elapsed))
+                    downloaded_human = human_readable_size(downloaded)
+
+                    sys.stdout.write(
+                        f"\r[{YELLOW}{bar}{RESET}] "
+                        f"{GREEN}{percent}%{RESET} "
+                        f":: {CYAN}{speed_str}{RESET} "
+                        f":: {downloaded_human}/{total_human} "
+                        f":: {elapsed_str}"
+                    )
+                    sys.stdout.flush()
+
+            print()
             print(f"{GREEN}Saved as:{RESET} {YELLOW}{filename}{RESET}")
+
     except Exception as e:
         print(f"{RED}Failed to download:{RESET} {YELLOW}{url}{RESET} {RED}- {e}{RESET}")
+
+
 
 def torrent_to_magnet(filepath):
     with open(filepath, 'rb') as f:
@@ -170,8 +273,10 @@ def torrent_to_magnet(filepath):
         magnet += f"&dn={urllib.parse.quote(name)}"
     return magnet
 
+
 def is_magnet(url):
     return url.strip().startswith("magnet:")
+
 
 def parse_selection(selection_input, max_index):
     selection = set()
@@ -188,7 +293,8 @@ def parse_selection(selection_input, max_index):
             idx = int(part)
             if 1 <= idx <= max_index:
                 selection.add(idx)
-    return sorted(selection)    
+    return sorted(selection)
+
 
 def get_real_debrid_links(url=None):
     token = REAL_DEBRID_API_TOKEN
@@ -211,22 +317,35 @@ def get_real_debrid_links(url=None):
         # Wait for torrent to be ready
         selection_sent = False
         while True:
-            info = requests.get(f"https://api.real-debrid.com/rest/1.0/torrents/info/{torrent_id}", headers=headers).json()
+            info = requests.get(
+                f"https://api.real-debrid.com/rest/1.0/torrents/info/{torrent_id}",
+                headers=headers
+            ).json()
             if info["status"] in ("waiting_files", "waiting_files_selection"):
                 if not selection_sent:
                     files = info["files"]
-                    print()
-                    print(f"{CYAN}Select files in torrent:{RESET}")
-                    for idx, f in enumerate(files, 1):
-                        path = f['path'].lstrip("/\\")
-                        print(f"{YELLOW}{idx}{RESET}: {path} {CYAN}({f['bytes']//1024//1024} MB){RESET}")
 
-                    selection = input(f"Enter numbers (e.g., 1,2,5-10) or 'all' (default all): ").strip().lower()
-                    if selection == "all" or not selection:
-                        file_ids = [str(f["id"]) for f in files]
-                    else:
-                        selected_indices = parse_selection(selection, len(files))
-                        file_ids = [str(files[i - 1]["id"]) for i in selected_indices]
+                    display_files = []
+                    for f in files:
+                        path = f.get("path", "").lstrip("/\\")
+                        size_bytes = f.get("bytes", 0)
+                        mb = size_bytes // (1024 * 1024)
+                        display_files.append({
+                            "name": path,
+                            "size": size_bytes,
+                        })
+
+                    print()
+                    selected_indexes = select_files_interactive(
+                        display_files,
+                        "Select files in torrent"
+                    )
+
+                    if not selected_indexes:
+                        print(f"{RED}No files selected.{RESET}")
+                        return []
+
+                    file_ids = [str(files[i]["id"]) for i in selected_indexes]
 
                     requests.post(
                         f"https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}",
@@ -274,22 +393,25 @@ def get_real_debrid_links(url=None):
                     else:
                         speed_str = f"{speed:.0f} B/s"
                     sys.stdout.write(
-                        f"\r{YELLOW}Downloading to cloud...{RESET} [{bar_colored}] {percent_str} | Speed: {CYAN}{speed_str}{RESET} | Seeders: {GREEN}{seeders}{RESET}   "
+                        f"\r{YELLOW}Downloading to cloud...{RESET} [{bar_colored}] "
+                        f"{percent_str} | Speed: {CYAN}{speed_str}{RESET} | "
+                        f"Seeders: {GREEN}{seeders}{RESET}   "
                     )
                     sys.stdout.flush()
                 else:
                     print(f"{YELLOW}Waiting for Real-Debrid... Status: {info['status']}{RESET}")
                 time.sleep(3)
                 if info["status"] != "downloading":
-                    print()  # Print newline after progress bar when done
+                    print()
                 time.sleep(3)
+
     elif "mega.nz/folder/" in url and "/file/" not in url:
         # Extract file links from folder
         file_links = extract_mega_files_from_folder(url)
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
-        
+
         print()
         print(f"{YELLOW}Unlocking files...{RESET}")
         unlocked = []
@@ -302,7 +424,10 @@ def get_real_debrid_links(url=None):
             data = resp.json()
             if "download" in data:
                 filename = data.get("filename") or urllib.parse.unquote(f.split("/")[-1])
-                unlocked.append({"name": filename, "url": data["download"]})
+                unlocked.append({
+                    "name": filename,
+                    "url": data["download"]
+                })
             else:
                 print(f"{RED}Could not unlock:{RESET} {YELLOW}{f}{RESET}")
 
@@ -310,20 +435,19 @@ def get_real_debrid_links(url=None):
             print(f"{RED}No files were unlocked.{RESET}")
             return []
 
-        # Prompt user for selection
-        print(f"{CYAN}Select files to download:{RESET}")
-        for idx, f in enumerate(unlocked, 1):
-            print(f"{YELLOW}{idx}{RESET}: {f['name']}")
+        selected_indexes = select_files_interactive(
+            unlocked,
+            "Select files to download"
+        )
 
-        selection = input(f"Enter numbers separated by commas or ranges (e.g., 1,3-5), or press Enter for all: ").strip()
-        if not selection or selection.lower() == "all":
-            return [f["url"] for f in unlocked]
+        if not selected_indexes:
+            print(f"{RED}No files selected.{RESET}")
+            return []
 
-        selected_indices = parse_selection(selection, len(unlocked))
-        return [unlocked[i - 1]["url"] for i in selected_indices]
+        return [unlocked[i]["url"] for i in selected_indexes]
 
     else:
-        # Hoster logic as before
+        # Hoster logic
         resp = requests.post(
             "https://api.real-debrid.com/rest/1.0/unrestrict/link",
             data={"link": url},
@@ -335,6 +459,7 @@ def get_real_debrid_links(url=None):
             print(f"{YELLOW}{data['download']}{RESET}")
             return [data["download"]]
         print(f"{RED}Hoster not supported or failed.{RESET}")
+
 
 def get_alldebrid_links(url=None):
     token = ALLDEBRID_API_TOKEN or input(f"{CYAN}Enter your AllDebrid API token:{RESET} ").strip()
@@ -349,12 +474,10 @@ def get_alldebrid_links(url=None):
         )
         try:
             data = resp.json()
-        except Exception as e:
-            # Handle concatenated JSON objects and print error/message if present
+        except Exception:
             text = resp.text
             parts = []
             if '}{' in text:
-                # Split at every '}{' and add braces back
                 split = text.split('}{')
                 for i, part in enumerate(split):
                     if i == 0:
@@ -365,136 +488,177 @@ def get_alldebrid_links(url=None):
                         parts.append('{' + part + '}')
             else:
                 parts = [text]
+
             for part in parts:
                 try:
                     obj = json.loads(part)
                     if "error" in obj or "message" in obj:
                         print(f"{RED}AllDebrid error:{RESET} {obj.get('error','')}")
                         print(f"{YELLOW}{obj.get('message','')}{RESET}")
-                except Exception:
+                except:
                     continue
             return []
+
         if data.get("status") != "success":
             print(f"{RED}Failed to add magnet.{RESET}")
             return []
+
         magnet_id = data["data"]["magnets"][0]["id"]
 
         # Wait for magnet to be ready
         selection_sent = False
         while True:
             info = requests.get(
-                "https://api.alldebrid.com/v4/magnet/status",
+                "https://api.alldebrid.com/v4.1/magnet/status",
                 params={"agent": "dl-script", "apikey": token, "id": magnet_id}
             ).json()
+
             if info.get("status") == "success":
                 magnet = info["data"]["magnets"]
+
                 if not isinstance(magnet, dict):
                     print(f"{RED}Unexpected magnet response.{RESET}")
-                    
                     return []
 
+                # Waiting for file selection
                 if magnet["status"] == "waiting_files":
                     if not selection_sent:
                         files = magnet["files"]
+
+                        display_files = []
+                        for f in files:
+                            path = f["path"].lstrip("/\\")
+                            size_bytes = f.get("size", 0)
+                            display_files.append({"name": path, "size": size_bytes})
+
                         print()
-                        print(f"{CYAN}Files in torrent:{RESET}")
-                        for idx, f in enumerate(files, 1):
-                            path = f['path'].lstrip("/\\")
-                            print(f"{YELLOW}{idx}{RESET}: {path} {CYAN}({f['size']//1024//1024} MB){RESET}")
-                        selection = input(f"{CYAN}Enter file numbers to download (comma separated, or 'all'):{RESET} ")
-                        if selection.strip().lower() == "all" or not selection.strip():
-                            file_ids = [str(f["id"]) for f in files]
-                        else:
-                            file_ids = [str(files[int(i)-1]["id"]) for i in selection.split(",") if i.strip().isdigit()]
-                        requests.post(
-                            "https://api.alldebrid.com/v4/magnet/selectFiles",
-                            params={"agent": "dl-script", "apikey": token, "id": magnet_id, "files": ",".join(file_ids)}
+                        selected = select_files_interactive(
+                            display_files,
+                            "Select files in torrent"
                         )
+
+                        if not selected:
+                            print(f"{RED}No files selected.{RESET}")
+                            return []
+
+                        file_ids = [str(files[i]["id"]) for i in selected]
+
+                        requests.post(
+                            "https://api.alldebrid.com/v4.1/magnet/selectFiles",
+                            params={
+                                "agent": "dl-script",
+                                "apikey": token,
+                                "id": magnet_id,
+                                "files": ",".join(file_ids)
+                            }
+                        )
+
                         print(f"{GREEN}Selection sent, waiting for AllDebrid to process...{RESET}")
                         selection_sent = True
                     else:
                         print(f"{YELLOW}Waiting for AllDebrid to process your selection...{RESET}")
                     time.sleep(3)
 
+                # Ready to provide unlocked links
                 elif magnet["status"].lower() == "ready":
                     raw_links = [l["link"] for l in magnet.get("links", []) if "link" in l]
+
                     if not raw_links:
-                        print(f"{RED}No links returned from AllDebrid.{RESET}")
+                        print(f"{RED}No links returned by AllDebrid.{RESET}")
                         return []
 
-                    # Unlock all links to get real download URLs
-                    final_links = []
+                    # Unrestrict via unlock endpoint
+                    unlocked = []
                     for l in raw_links:
                         r = requests.get(
-                            "https://api.alldebrid.com/v4/link/unlock",
+                            "https://api.alldebrid.com/v4.1/link/unlock",
                             params={"agent": "dl-script", "apikey": token, "link": l}
                         ).json()
                         if r.get("status") == "success" and "link" in r.get("data", {}):
-                            final_links.append(r["data"]["link"])
+                            unlocked.append(r["data"]["link"])
                         else:
                             print(f"{RED}Failed to unlock link:{RESET} {YELLOW}{l}{RESET}")
 
-                    print(f"{GREEN}Resolved direct links:{RESET}")
-                    for i, link in enumerate(final_links, 1):
-                        print(f"{YELLOW}{i}{RESET}: {link}")
-                    choice = input(f"{CYAN}Enter numbers separated by commas, or 'all' (default all):{RESET} ")
-                    if not choice.strip() or choice.strip().lower() == "all":
-                        selected = final_links
-                    else:
-                        ids = set(int(x) for x in choice.split(",") if x.strip().isdigit())
-                        selected = [link for idx, link in enumerate(final_links, 1) if idx in ids]
-                    return selected
+                    if not unlocked:
+                        print(f"{RED}No links were unlocked.{RESET}")
+                        return []
+
+                    # Build improved display list using filenames
+                    display_links = []
+                    for link in unlocked:
+                        # Extract filename from URL
+                        filename = link.split("/")[-1] if "/" in link else link
+                        # Clean query parameters if present
+                        filename = filename.split("?")[0]
+                        display_links.append({"name": filename or link, "size": 0})
+
+                    selected = select_files_interactive(
+                        display_links,
+                        "Select links to download"
+                    )
+
+                    return [unlocked[i] for i in selected]
 
                 elif magnet["status"] == "error":
                     print(f"{RED}Magnet error.{RESET}")
                     return []
+
                 elif magnet["status"] == "Downloading":
                     downloaded = magnet.get("downloaded", 0)
                     size = magnet.get("size", 0)
-                    if size:
-                        percent = min(100, int(downloaded * 100 // size))
-                    else:
-                        percent = 0
-                    seeders = magnet.get("seeders", 0)
-                    bar_length = 30
-                    num_hashes = int(percent * bar_length // 100)
-                    bar = '#' * num_hashes
-                    bar = bar.ljust(bar_length)
-                    bar_colored = f"{YELLOW}{bar}{RESET}"
-                    percent_str = f"{GREEN}{percent}%{RESET}"
+                    percent = int(downloaded * 100 // size) if size else 0
                     speed = magnet.get("downloadSpeed", 0)
+                    seeders = magnet.get("seeders", 0)
+
+                    # Progress bar
+                    bar_length = 30
+                    bar = '#' * int(percent * bar_length // 100)
+                    bar = bar.ljust(bar_length)
+
                     if speed >= 1024 * 1024:
                         speed_str = f"{speed/1024/1024:.2f} MB/s"
                     elif speed >= 1024:
                         speed_str = f"{speed/1024:.1f} KB/s"
                     else:
                         speed_str = f"{speed:.0f} B/s"
+
                     sys.stdout.write(
-                        f"\r{YELLOW}Downloading to cloud...{RESET} [{bar_colored}] {percent_str} | Speed: {CYAN}{speed_str}{RESET} | Seeders: {GREEN}{seeders}{RESET}   "
+                        f"\r{YELLOW}Downloading to cloud...{RESET} "
+                        f"[{YELLOW}{bar}{RESET}] "
+                        f"{GREEN}{percent}%{RESET} | "
+                        f"Speed: {CYAN}{speed_str}{RESET} | "
+                        f"Seeders: {GREEN}{seeders}{RESET}   "
                     )
                     sys.stdout.flush()
                     time.sleep(3)
+
             else:
                 print(f"{YELLOW}Waiting for AllDebrid...{RESET}")
                 time.sleep(3)
+
     elif "mega.nz/folder/" in url and "/file/" not in url:
-        # Extract file links from folder
+        # Extract MEGA folder contents
         file_links = extract_mega_files_from_folder(url)
         if not file_links:
             print(f"{RED}Could not extract MEGA file links from folder.{RESET}")
             return []
-        print()
+
         print(f"{YELLOW}Unlocking files...{RESET}")
         unlocked = []
+
         for f in file_links:
             resp = requests.get(
-                "https://api.alldebrid.com/v4/link/unlock",
+                "https://api.alldebrid.com/v4.1/link/unlock",
                 params={"agent": "dl-script", "apikey": token, "link": f}
             )
             data = resp.json()
+
             if data.get("status") == "success" and "link" in data.get("data", {}):
-                filename = data["data"].get("filename") or urllib.parse.unquote(f.split("/")[-1])
-                unlocked.append({"name": filename, "url": data["data"]["link"]})
+                filename = data["data"].get("filename") or f.split("/")[-1]
+                unlocked.append({
+                    "name": filename,
+                    "url": data["data"]["link"]
+                })
             else:
                 print(f"{RED}Could not unlock:{RESET} {YELLOW}{f}{RESET}")
 
@@ -502,30 +666,30 @@ def get_alldebrid_links(url=None):
             print(f"{RED}No files were unlocked.{RESET}")
             return []
 
-        # Prompt user to select which files to download
-        print(f"{CYAN}Select files to download:{RESET}")
-        for idx, f in enumerate(unlocked, 1):
-            print(f"{YELLOW}{idx}{RESET}: {f['name']}")
+        # Unified selection
+        selected = select_files_interactive(
+            unlocked,
+            "Select files to download"
+        )
 
-        selection = input(f"Enter numbers separated by commas or ranges (e.g., 1,3-5), or press Enter for all: ").strip()
-        if not selection or selection.lower() == "all":
-            return [f["url"] for f in unlocked]
-
-        selected_indices = parse_selection(selection, len(unlocked))
-        return [unlocked[i - 1]["url"] for i in selected_indices]
+        return [unlocked[i]["url"] for i in selected]
 
     else:
-        # Hoster logic
+        # Hoster direct unlock
         resp = requests.get(
-            "https://api.alldebrid.com/v4/link/unlock",
+            "https://api.alldebrid.com/v4.1/link/unlock",
             params={"agent": "dl-script", "apikey": token, "link": url}
         )
         data = resp.json()
+
         if data.get("status") == "success" and "link" in data.get("data", {}):
             print(f"{GREEN}Resolved direct link:{RESET}")
             print(f"{YELLOW}{data['data']['link']}{RESET}")
             return [data["data"]["link"]]
+
         print(f"{RED}Hoster not supported or failed.{RESET}")
+        return []
+
 
 def get_premiumize_links(url=None):
     token = PREMIUMIZE_API_TOKEN or input(f"{CYAN}Enter your Premiumize.me API token:{RESET} ").strip()
@@ -613,24 +777,32 @@ def get_premiumize_links(url=None):
                     return []
             time.sleep(3)
 
-        # Fetch *all* files with links
-        files = get_all_files_with_links(token, folder_id)
+        folder_resp = requests.get(
+            "https://www.premiumize.me/api/folder/list",
+            params={"apikey": token, "id": folder_id}
+        ).json()
+
+        files = [
+            f for f in folder_resp.get("content", [])
+            if f.get("type") == "file" and "link" in f
+        ]
+
         if not files:
-            print(f"{RED}No downloadable files found.{RESET}")
+            print(f"{RED}No downloadable files found in transfer folder.{RESET}")
             return []
 
-        # Show and let user select (or 'all')
-        print(f"{CYAN}Files ready to download:{RESET}")
-        for i, f in enumerate(files, 1):
-            mb = f["size"] // (1024*1024)
-            print(f"{YELLOW}{i}{RESET}: {f['name']} {CYAN}({mb} MB){RESET}")
-        choice = input(f"{CYAN}Enter numbers separated by commas, or 'all':{RESET} ")
-        if not choice.strip() or choice.strip().lower() == "all":
-            selected = files
-        else:
-            ids = set(int(x) for x in choice.split(",") if x.strip().isdigit())
-            selected = [f for idx, f in enumerate(files, 1) if idx in ids]
-        return [f["link"] for f in selected]
+        display_files = [
+            {"name": f.get("name", "Unknown"), "size": f.get("size", 0)}
+            for f in files
+        ]
+
+        selected_indexes = select_files_interactive(
+            display_files,
+            "Select files to download"
+        )
+
+        return [files[i]["link"] for i in selected_indexes]
+
     else:
         # Hoster logic
         resp = requests.get(
@@ -646,14 +818,19 @@ def get_premiumize_links(url=None):
             elif data.get("type") == "container" and "content" in data:
                 print(f"{CYAN}Container detected. Files in folder:{RESET}")
                 files = data["content"]
-                for idx, f in enumerate(files, 1):
-                    print(f"{YELLOW}{idx}{RESET}: {f}")
-                choice = input(f"{CYAN}Enter numbers separated by commas, or 'all' (default all):{RESET} ")
-                if not choice.strip() or choice.strip().lower() == "all":
-                    selected = files
-                else:
-                    ids = set(int(x) for x in choice.split(",") if x.strip().isdigit())
-                    selected = [f for idx, f in enumerate(files, 1) if idx in ids]
+
+                # Build display list for unified selector
+                display_files = [
+                    {"name": str(f), "size": None}
+                    for f in files
+                ]
+
+                selected_indexes = select_files_interactive(
+                    display_files,
+                    "Select container entries"
+                )
+
+                selected = [files[i] for i in selected_indexes]
                 # Now unlock each selected file
                 unlocked = []
                 for f in selected:
@@ -670,285 +847,6 @@ def get_premiumize_links(url=None):
                 return unlocked
         print(f"{RED}Hoster not supported or failed.{RESET}")
         return []
-    
-def get_torbox_links(url=None):
-    token = TORBOX_API_TOKEN or input(f"{CYAN}Enter your Torbox API token:{RESET} ").strip()
-    if not url:
-        url = input(f"{CYAN}Paste your magnet or hoster URL:{RESET} ").strip()
-
-    headers = {"Authorization": f"Bearer {token}"}
-
-    if is_magnet(url):
-        # 1️⃣ Create the torrent with multipart/form-data
-        resp = requests.post(
-            "https://api.torbox.app/v1/api/torrents/createtorrent",
-            files={
-                "magnet": (None, url),
-                "allow_zip": (None, "true"),
-                "as_queued": (None, "false"),
-            },
-            headers=headers,
-            timeout=10
-        )
-
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("success"):
-            print(f"{RED}Error creating torrent: {data.get('error')}{RESET}")
-            return []
-
-        torrent_id = data["data"].get("torrent_id") or data["data"].get("id")
-        print()
-        print(f"{GREEN}Torrent queued—ID {torrent_id}. Getting file list...{RESET}")
-
-        # 2️⃣ Get correct file list using /mylist endpoint (has real file IDs)
-        mylist_resp = requests.get(
-            "https://api.torbox.app/v1/api/torrents/mylist",
-            params={"token": TORBOX_API_TOKEN, "id": torrent_id},
-            headers=headers,
-            timeout=15,
-        )
-
-        mylist_data = mylist_resp.json()
-        if not mylist_data.get("success") or not mylist_data.get("data"):
-            print(f"{RED}Failed to fetch file list from /mylist: {mylist_data.get('error')}{RESET}")
-            return []
-
-        files = mylist_data["data"].get("files", [])
-        if not files:
-            print(f"{RED}No files found in torrent metadata.{RESET}")
-            return []
-
-        print(f"{GREEN}Found {len(files)} files. Checking which are ready...{RESET}")
-
-        # 3️⃣ File size formatting helper
-        def sizeof_fmt(num, suffix="B"):
-            for unit in ["", "K", "M", "G", "T"]:
-                if abs(num) < 1024:
-                    return f"{num:.0f} {unit}{suffix}"
-                num /= 1024
-            return f"{num:.0f} P{suffix}"
-
-        # 4️⃣ Display list to user (1-based)
-        print("Select files to download:")
-        for i, f in enumerate(files, 1):
-            print(f"{YELLOW}{i}{RESET}: {f['short_name']} {CYAN}({sizeof_fmt(f['size'])}){RESET}")
-
-        selection = input("Enter file numbers separated by commas, or 'all' [default=all]: ").strip()
-
-        if not selection or selection.lower() == "all":
-            selected_indexes = set(range(len(files)))
-        else:
-            try:
-                selected_indexes = set(
-                    int(i.strip()) - 1
-                    for i in selection.split(",")
-                    if i.strip().isdigit() and 0 < int(i.strip()) <= len(files)
-                )
-            except Exception as e:
-                print(f"{RED}Invalid selection: {e}{RESET}")
-                return []
-
-        # 5️⃣ Request download links using real file IDs
-        links = []
-
-        for idx in selected_indexes:
-            f = files[idx]
-            file_id = f["id"]  # ✅ use API-supplied file ID
-            print(f"{YELLOW}Waiting for file {CYAN}{idx + 1}{RESET}: {f['name']}{RESET}")
-
-            while True:
-                r = requests.get(
-                    "https://api.torbox.app/v1/api/torrents/requestdl",
-                    params={
-                        "token": TORBOX_API_TOKEN,
-                        "torrent_id": torrent_id,
-                        "file_id": file_id,
-                        "redirect": "false",
-                    },
-                    timeout=10,
-                )
-                resp_data = r.json()
-                if r.status_code == 200 and resp_data.get("success"):
-                    download_url = resp_data.get("data")
-                    print(f"{GREEN}File {idx + 1} is ready.{RESET}")
-                    links.append(download_url)
-                    break
-                elif "not ready" in resp_data.get("error", "").lower():
-                    print(f"{YELLOW}File {idx + 1} not ready. Retrying...{RESET}")
-                    time.sleep(5)
-                else:
-                    print(f"{RED}Unexpected error for file {idx + 1}: {resp_data}{RESET}")
-                    break
-
-        if links:
-            print(f"{GREEN}Resolved direct links:{RESET}")
-            for l in links:
-                print(f"{YELLOW}{l}{RESET}")
-        else:
-            print(f"{RED}No files could be downloaded at this time.{RESET}")
-
-        return links
-    
-    else:
-        # Hoster logic
-        md5_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
-        check_resp = requests.post(
-            "https://api.torbox.app/v1/api/webdl/checkcached",
-            json={"hashes": [md5_hash]},
-            headers=headers,
-            timeout=30
-        )
-
-        if check_resp.status_code != 200 or not check_resp.json().get("success"):
-            print(f"{RED}Failed to check cached webdl.{RESET}")
-            return []
-
-        cached_data = check_resp.json().get("data", {})
-        is_cached = md5_hash in cached_data
-
-        print(f"{GREEN}Found cached web download. Creating job to retrieve file list...{RESET}" if is_cached else f"{YELLOW}Not cached. Creating new job...{RESET}")
-
-        create_resp = requests.post(
-            "https://api.torbox.app/v1/api/webdl/createwebdownload",
-            data={"link": url},
-            headers=headers,
-            timeout=30
-        )
-
-        if create_resp.status_code != 200 or not create_resp.json().get("success"):
-            print(f"{RED}Failed to create web download job.{RESET}")
-            return []
-
-        data = create_resp.json().get("data", {})
-        web_id = data.get("webdownload_id")
-        if not web_id:
-            print(f"{RED}Job created but no webdownload_id returned.{RESET}")
-            return []
-
-        print(f"{CYAN}Resolved web_id:{RESET} {web_id}")
-
-        # Get full file list
-        # First status check
-        mylist_resp = requests.get(
-            "https://api.torbox.app/v1/api/webdl/mylist",
-            params={"token": TORBOX_API_TOKEN, "id": web_id},
-            headers=headers,
-            timeout=30
-        )
-
-        mylist_data = mylist_resp.json()
-        if not mylist_data.get("success"):
-            print(f"{RED}Failed to retrieve job status from mylist.{RESET}")
-            return []
-
-        data = mylist_data.get("data", {})
-        state = data.get("download_state")
-        progress = data.get("progress", 0.0)
-        speed = data.get("download_speed", 0)
-        files = data.get("files", [])
-
-                # These states mean "not ready yet"
-        pending_states = {"downloading", "processing", "waiting"}
-        last_state = state
-
-        if state in pending_states and not files:
-            print(f"{CYAN}Waiting for cloud download to finish...{RESET}")
-
-            while state in pending_states:
-                bar_len = 30
-                bar = "#" * int(progress * bar_len)
-                bar = bar.ljust(bar_len)
-                percent = int(progress * 100)
-                speed_mb = f"{speed / (1024 * 1024):.2f} MB/s" if speed else "–"
-
-                sys.stdout.write(
-                    f"\r{YELLOW}Downloading to cloud...{RESET} [{bar}] {GREEN}{percent}%{RESET} :: {CYAN}{speed_mb}{RESET}   "
-                )
-                sys.stdout.flush()
-
-                time.sleep(5)
-
-                # Re-check status
-                mylist_resp = requests.get(
-                    "https://api.torbox.app/v1/api/webdl/mylist",
-                    params={"token": TORBOX_API_TOKEN, "id": web_id},
-                    headers=headers,
-                    timeout=30
-                )
-                mylist_data = mylist_resp.json()
-                data = mylist_data.get("data", {})
-                state = data.get("download_state")
-                progress = data.get("progress", 0.0)
-                speed = data.get("download_speed", 0)
-
-            print()  # Newline after progress bar
-
-            if state != "completed":
-                print(f"{RED}Download failed or is still not ready. Final state: {state}{RESET}")
-                return []
-
-            files = data.get("files", [])
-
-
-        # Final check for file list
-        if not files:
-            print(f"{RED}No downloadable files listed.{RESET}")
-            return []
-
-
-        print(f"{GREEN}Found {len(files)} file(s).{RESET}")
-        for idx, f in enumerate(files, 1):
-            name = f.get("short_name", "Unknown")
-            size = f.get("size", 0)
-            mb = size // (1024 * 1024)
-            print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
-
-        choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g., 1,3-5), or 'all' [default=all]:{RESET} ").strip()
-
-        if not choice or choice.lower() == "all":
-            selected_indexes = set(range(len(files)))
-        else:
-            selected_indexes = set()
-            for part in choice.split(","):
-                part = part.strip()
-                if '-' in part:
-                    try:
-                        start, end = map(int, part.split('-'))
-                        selected_indexes.update(range(start - 1, end))
-                    except Exception:
-                        continue
-                elif part.isdigit():
-                    i = int(part)
-                    if 1 <= i <= len(files):
-                        selected_indexes.add(i - 1)
-
-        print(f"{GREEN}Requesting download links...{RESET}")
-        urls = []
-        for idx in sorted(selected_indexes):
-            f = files[idx]
-            fid = f.get("id")
-            name = f.get("short_name", "Unknown")
-
-            dl_resp = requests.get(
-                "https://api.torbox.app/v1/api/webdl/requestdl",
-                params={"token": TORBOX_API_TOKEN, "web_id": web_id, "file_id": fid},
-                headers=headers,
-                timeout=10
-            )
-
-            if dl_resp.status_code == 200 and dl_resp.json().get("success"):
-                url = dl_resp.json().get("data")
-                if url:
-                    print(f"{YELLOW}{name}:{RESET} {url}")
-                    urls.append(url)
-                else:
-                    print(f"{RED}No URL for {name}.{RESET}")
-            else:
-                print(f"{RED}Failed to get download for {name}.{RESET}")
-
-        return urls
-
 
 def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
     from pathlib import Path
@@ -1054,21 +952,18 @@ def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
                 print(f"{RED}No files in direct download response.{RESET}")
                 return []
 
-            print(f"{GREEN}Found {len(content)} file(s).{RESET}")
-            for idx, f in enumerate(content, 1):
-                name = f.get("path", "Unknown")
-                size = f.get("size", 0)
-                mb = size // (1024 * 1024)
-                print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
+            display_files = [
+                {
+                    "name": f.get("path", "Unknown"),
+                    "size": f.get("size", 0)
+                }
+                for f in content
+            ]
 
-            choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g. 1,3-5), or 'all' (default all):{RESET} ").strip()
-            if not choice or choice.lower() == "all":
-                selected_indexes = list(range(len(content)))
-            else:
-                selected_indexes = parse_selection(choice, len(content))
-                if not selected_indexes:
-                    print(f"{RED}No valid file indexes selected.{RESET}")
-                    return []
+            selected_indexes = select_files_interactive(
+                display_files,
+                "Select NZB files to download"
+            )
 
             return [content[i]["link"] for i in selected_indexes if content[i].get("link")]
         else:
@@ -1094,28 +989,300 @@ def get_premiumize_links_from_nzb(nzb_path: str) -> list[str]:
                 print(f"{RED}No downloadable files found in folder.{RESET}")
                 return []
 
-            print(f"{GREEN}Found {len(files)} file(s).{RESET}")
-            for idx, f in enumerate(files, 1):
-                name = f.get("name", "Unknown")
-                size = f.get("size", 0)
-                mb = size // (1024 * 1024)
-                print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
+            display_files = [
+                {
+                    "name": f.get("name", "Unknown"),
+                    "size": f.get("size", 0)
+                }
+                for f in files
+            ]
 
-            choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g. 1,3-5), or 'all' (default all):{RESET} ").strip()
-            if not choice or choice.lower() == "all":
-                selected_indexes = list(range(len(files)))
-            else:
-                selected_indexes = parse_selection(choice, len(files))
-                if not selected_indexes:
-                    print(f"{RED}No valid file indexes selected.{RESET}")
-                    return []
+            selected_indexes = select_files_interactive(
+                display_files,
+                "Select NZB files to download"
+            )
 
             return [files[i]["link"] for i in selected_indexes]
-
 
     except Exception as e:
         print(f"{RED}Exception during Premiumize NZB processing: {e}{RESET}")
         return []
+
+def get_torbox_links(url=None):
+    token = TORBOX_API_TOKEN or input(f"{CYAN}Enter your Torbox API token:{RESET} ").strip()
+    if not url:
+        url = input(f"{CYAN}Paste your magnet or hoster URL:{RESET} ").strip()
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    #  MAGNET MODE
+    if is_magnet(url):
+        # 1. Create torrent job
+        resp = requests.post(
+            "https://api.torbox.app/v1/api/torrents/createtorrent",
+            files={
+                "magnet": (None, url),
+                "allow_zip": (None, "true"),
+                "as_queued": (None, "false"),
+            },
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("success"):
+            print(f"{RED}Error creating torrent: {data.get('error')}{RESET}")
+            return []
+
+        torrent_id = data["data"].get("torrent_id") or data["data"].get("id")
+        print(f"{GREEN}Torrent queued — ID {torrent_id}. Getting file list...{RESET}")
+
+        # 2. Fetch metadata with real file IDs
+        mylist_resp = requests.get(
+            "https://api.torbox.app/v1/api/torrents/mylist",
+            params={"token": token, "id": torrent_id},
+            headers=headers,
+            timeout=15
+        )
+        mylist_data = mylist_resp.json()
+
+        if not mylist_data.get("success") or not mylist_data.get("data"):
+            print(f"{RED}Failed to fetch file list from /mylist{RESET}")
+            return []
+
+        files = mylist_data["data"].get("files", [])
+        if not files:
+            print(f"{RED}No files found in torrent metadata.{RESET}")
+            return []
+
+        print(f"{GREEN}Found {len(files)} files. Checking which are ready...{RESET}")
+
+        display_files = []
+        for f in files:
+            size = f.get("size", 0)
+            display_files.append({
+                "name": f.get("short_name", f.get("name", "Unknown")),
+                "size": size
+            })
+
+        selected_indexes = select_files_interactive(display_files, "Select files to download")
+
+        links = []
+
+        # 3. Request download link for each selected file
+        for idx in selected_indexes:
+            f = files[idx]
+            file_id = f["id"]
+            name = f.get("short_name") or f.get("name", "Unknown")
+
+            print(f"{YELLOW}Waiting for file {CYAN}{idx+1}{RESET}: {name}{RESET}")
+
+            # Keep polling until ready
+            while True:
+                r = requests.get(
+                    "https://api.torbox.app/v1/api/torrents/requestdl",
+                    params={
+                        "token": token,
+                        "torrent_id": torrent_id,
+                        "file_id": file_id,
+                        "redirect": "false",
+                    },
+                    timeout=10,
+                )
+                resp_data = r.json()
+
+                if r.status_code == 200 and resp_data.get("success"):
+                    download_url = resp_data.get("data")
+                    print(f"{GREEN}File {idx + 1} is ready.{RESET}")
+                    links.append(download_url)
+                    break
+
+                # File not ready yet
+                if "not ready" in resp_data.get("error", "").lower():
+                    print(f"{YELLOW}File {idx + 1} not ready. Retrying...{RESET}")
+                    time.sleep(5)
+                    continue
+
+                # Unexpected error
+                print(f"{RED}Unexpected error for file {idx+1}: {resp_data}{RESET}")
+                break
+
+        # Final printing
+        if links:
+            print(f"{GREEN}Resolved direct links:{RESET}")
+            for l in links:
+                print(f"{YELLOW}{l}{RESET}")
+        else:
+            print(f"{RED}No files ready for download.{RESET}")
+
+        return links
+
+    #  HOSTER MODE  (non-magnet)
+    md5_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+
+    check_resp = requests.post(
+        "https://api.torbox.app/v1/api/webdl/checkcached",
+        json={"hashes": [md5_hash]},
+        headers=headers,
+        timeout=30
+    )
+
+    if check_resp.status_code != 200 or not check_resp.json().get("success"):
+        print(f"{RED}Failed to check cached webdl.{RESET}")
+        return []
+
+    cached_data = check_resp.json().get("data", {})
+    is_cached = md5_hash in cached_data
+
+    print(
+        f"{GREEN}Found cached web download. Creating job...{RESET}"
+        if is_cached else
+        f"{YELLOW}Not cached. Creating new job...{RESET}"
+    )
+
+    create_resp = requests.post(
+        "https://api.torbox.app/v1/api/webdl/createwebdownload",
+        data={"link": url},
+        headers=headers,
+        timeout=30
+    )
+
+    if create_resp.status_code != 200 or not create_resp.json().get("success"):
+        print(f"{RED}Failed to create web download job.{RESET}")
+        return []
+
+    data = create_resp.json().get("data", {})
+    web_id = data.get("webdownload_id")
+
+    if not web_id:
+        print(f"{RED}Job created but no webdownload_id returned.{RESET}")
+        return []
+
+    print(f"{CYAN}Resolved web_id:{RESET} {web_id}")
+
+    # First status check
+    mylist_resp = requests.get(
+        "https://api.torbox.app/v1/api/webdl/mylist",
+        params={"token": token, "id": web_id},
+        headers=headers,
+        timeout=30
+    )
+    mylist_data = mylist_resp.json()
+
+    if not mylist_data.get("success"):
+        print(f"{RED}Failed to retrieve job status from mylist.{RESET}")
+        return []
+
+    data = mylist_data.get("data", {})
+    state = data.get("download_state")
+    progress = data.get("progress", 0.0)
+    speed = data.get("download_speed", 0)
+    files = data.get("files", [])
+
+    # Poll if still processing
+    pending_states = {"downloading", "processing", "waiting"}
+
+    if state in pending_states and not files:
+        print(f"{CYAN}Waiting for cloud download to finish...{RESET}")
+
+        while state in pending_states:
+            # Visual Progress Bar
+            bar_len = 30
+            filled = int(progress * bar_len)
+            bar = "#" * filled
+            bar = bar.ljust(bar_len)
+
+            speed_mb = f"{speed / (1024 * 1024):.2f} MB/s" if speed else "—"
+
+            sys.stdout.write(
+                f"\r{YELLOW}Downloading to cloud...{RESET} "
+                f"[{bar}] {GREEN}{int(progress*100)}%{RESET} :: {CYAN}{speed_mb}{RESET}   "
+            )
+            sys.stdout.flush()
+
+            time.sleep(5)
+
+            # Refresh status
+            try:
+                mylist_resp = requests.get(
+                    "https://api.torbox.app/v1/api/webdl/mylist",
+                    params={"token": token, "id": web_id},
+                    headers=headers,
+                    timeout=30
+                )
+                
+                # Check for HTTP errors (e.g., 502 Bad Gateway)
+                if mylist_resp.status_code != 200:
+                    continue # Skip this loop iteration and try again in 5 seconds
+
+                mylist_data = mylist_resp.json()
+                
+                # Check for API logic errors
+                if not mylist_data.get("success"):
+                    continue # API said "failed", skip and try again
+
+                # safely get data, defaulting to empty dict if None
+                data = mylist_data.get("data") or {} 
+                
+                state = data.get("download_state")
+                progress = data.get("progress", 0.0)
+                speed = data.get("download_speed", 0)
+                
+                # If state is None/Empty, break to avoid infinite loop of nothingness
+                if not state:
+                    print(f"\n{RED}Error: API returned empty state.{RESET}")
+                    break
+
+            except Exception as e:
+                # If connection drops, don't crash. Just wait and try again.
+                continue
+
+        print() # Newline after progress bar finishes
+
+    # Ensure file list exists
+    files = data.get("files", [])
+    if not files:
+        print(f"{RED}No downloadable files listed.{RESET}")
+        return []
+
+    # Build display file entries for unified selector
+    display_files = []
+    for f in files:
+        display_files.append({
+            "name": f.get("short_name", "Unknown"),
+            "size": f.get("size", 0)
+        })
+
+    # File selection
+    selected_indexes = select_files_interactive(display_files, "Select files")
+
+    print(f"{GREEN}Requesting download links...{RESET}")
+    urls = []
+
+    for idx in selected_indexes:
+        f = files[idx]
+        fid = f.get("id")
+        name = f.get("short_name", "Unknown")
+
+        dl_resp = requests.get(
+            "https://api.torbox.app/v1/api/webdl/requestdl",
+            params={"token": token, "web_id": web_id, "file_id": fid},
+            headers=headers,
+            timeout=10
+        )
+
+        if dl_resp.status_code == 200 and dl_resp.json().get("success"):
+            url = dl_resp.json().get("data")
+            if url:
+                print(f"{YELLOW}{name}:{RESET} {url}")
+                urls.append(url)
+            else:
+                print(f"{RED}No URL for {name}.{RESET}")
+        else:
+            print(f"{RED}Failed to get download for {name}.{RESET}")
+
+    return urls
 
 
 def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
@@ -1146,11 +1313,12 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
             print(f"{RED}Upload succeeded but no ID returned.{RESET}")
             return []
 
-        # Now query mylist to get all file entries
         print(f"{CYAN}Getting download info for Usenet ID {usenet_id}...{RESET}")
 
-        # Retry fetching file list up to 5 times with a delay
+        # Retry fetching file list several times (Torbox needs a few seconds)
         max_retries = 10
+        files = []
+
         for attempt in range(1, max_retries + 1):
             mylist_resp = requests.get(
                 "https://api.torbox.app/v1/api/usenet/mylist",
@@ -1170,54 +1338,63 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
                 print(f"{RED}Failed to query mylist for NZB (attempt {attempt}/{max_retries}).{RESET}")
 
             time.sleep(3)
-        else:
-            print(f"{RED}No files found in mylist response after {max_retries} attempts.{RESET}")
+
+        if not files:
+            print(f"{RED}No files found in mylist response after retries.{RESET}")
             return []
 
         print(f"{GREEN}Found {len(files)} file(s).{RESET}")
-        for idx, f in enumerate(files, 1):
-            name = f.get("name", "Unknown")
-            size = f.get("size", 0)
-            mb = size // (1024 * 1024)
-            print(f"{YELLOW}{idx}{RESET}: {name} {CYAN}({mb} MB){RESET}")
 
-        # Prompt user for selection
-        choice = input(f"{CYAN}Enter file numbers separated by commas or ranges (e.g. 1,3-5), or 'all' (default all):{RESET} ").strip()
-        if not choice or choice.lower() == "all":
-            selected_indexes = list(range(len(files)))
-        else:
-            selected_indexes = parse_selection(choice, len(files))
-            if not selected_indexes:
-                print(f"{RED}No valid file indexes selected.{RESET}")
-                return []
+        # Build standardized display entries for unified selection
+        display_files = []
+        for f in files:
+            display_files.append({
+                "name": f.get("name", "Unknown"),
+                "size": f.get("size", 0)
+            })
+
+        # Unified selection (supports ranges + commas + 'all')
+        selected_indexes = select_files_interactive(
+            display_files,
+            "Select NZB files to download"
+        )
+
+        if not selected_indexes:
+            print(f"{RED}No files selected.{RESET}")
+            return []
 
         print(f"{GREEN}Requesting download links...{RESET}")
         urls = []
+
+        # Request DL for selected file IDs
         for idx in selected_indexes:
             f = files[idx]
             fid = f.get("id")
             name = f.get("name", "Unknown")
+
             dl_resp = requests.get(
                 "https://api.torbox.app/v1/api/usenet/requestdl",
                 params={"token": TORBOX_API_TOKEN, "usenet_id": usenet_id, "file_id": fid},
                 headers=headers,
                 timeout=30
             )
+
             if dl_resp.status_code == 200 and dl_resp.json().get("success"):
                 url = dl_resp.json().get("data")
                 if url:
                     print(f"{YELLOW}{name}:{RESET} {url}")
                     urls.append(url)
                 else:
-                    print(f"{RED}No URL for {name}.{RESET}")
+                    print(f"{RED}No URL returned for {name}.{RESET}")
             else:
-                print(f"{RED}Failed to get download for {name}.{RESET}")
+                print(f"{RED}Failed to get download link for {name}.{RESET}")
 
         return urls
 
     except Exception as e:
         print(f"{RED}Exception during NZB upload or download: {e}{RESET}")
         return []
+
 
 
 def get_all_files_with_links(token, folder_id):
@@ -1246,14 +1423,18 @@ def get_all_files_with_links(token, folder_id):
                 })
 
     recurse(folder_id)
-    return files    
+    return files
+
 
 def extract_mega_files_from_folder(folder_url: str) -> list[str]:
-    match = re.search(r"mega\.nz/folder/([a-zA-Z0-9_-]+)#([a-zA-Z0-9_-]+)", folder_url)
+    match = re.search(
+        r"mega\.nz/folder/([a-zA-Z0-9_-]+)#([a-zA-Z0-9_-]+)",
+        folder_url
+    )
     if not match:
         print("Invalid MEGA folder URL")
         return []
-    
+
     folder_id, key = match.group(1), match.group(2)
     try:
         resp = requests.post(
@@ -1268,7 +1449,9 @@ def extract_mega_files_from_folder(folder_url: str) -> list[str]:
             if file.get("t") == 0:  # regular file, not folder
                 file_id = file.get("h")
                 if file_id:
-                    file_url = f"https://mega.nz/folder/{folder_id}#{key}/file/{file_id}"
+                    file_url = (
+                        f"https://mega.nz/folder/{folder_id}#{key}/file/{file_id}"
+                    )
                     urls.append(file_url)
         return urls
 
@@ -1279,6 +1462,7 @@ def extract_mega_files_from_folder(folder_url: str) -> list[str]:
             return extract_mega_file_links_with_premiumize(folder_url)
         else:
             return []
+
 
 def extract_mega_file_links_with_premiumize(folder_url):
     token = PREMIUMIZE_API_TOKEN
@@ -1291,28 +1475,76 @@ def extract_mega_file_links_with_premiumize(folder_url):
         return data["content"]
     return []
 
+
 def check_real_debrid_cache(url):
     if not REAL_DEBRID_API_TOKEN:
         return None
 
     headers = {"Authorization": f"Bearer {REAL_DEBRID_API_TOKEN}"}
+    base_url = "https://api.real-debrid.com/rest/1.0"
 
+    # --- MAGNET LINK HANDLING ---
     if is_magnet(url):
+        torrent_id = None
         try:
-            resp = requests.get(
-                "https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/" + urllib.parse.quote(url),
+            # 1. Add Magnet to Account
+            add_resp = requests.post(
+                f"{base_url}/torrents/addMagnet", 
+                data={"magnet": url}, 
                 headers=headers
             )
-            data = resp.json()
-            if "error" in data and data["error"] == "hoster_unsupported":
-                return ("not_supported", None)
-            return ("supported", bool(data and any(data.values())))
-        except Exception:
+            
+            # Handle API errors or Unsupported hosts
+            if add_resp.status_code != 201:
+                data = add_resp.json()
+                if data.get("error") == "hoster_unsupported":
+                    return ("not_supported", None)
+                return ("supported", False)
+
+            torrent_id = add_resp.json()['id']
+
+            # 2. Get Info to see file list
+            info_resp = requests.get(f"{base_url}/torrents/info/{torrent_id}", headers=headers).json()
+
+            # 3. Smart Selection
+            # If status is "waiting_files_selection", we must select a file to trigger the cache check.
+            # We select the LARGEST file to avoid false negatives from tiny sample files.
+            if info_resp['status'] == 'waiting_files_selection':
+                files = info_resp['files']
+                # Sort by size (bytes) descending and pick the first one
+                largest_file = sorted(files, key=lambda x: x['bytes'], reverse=True)[0]
+                file_id = str(largest_file['id'])
+                
+                # Post the selection
+                requests.post(f"{base_url}/torrents/selectFiles/{torrent_id}", data={"files": file_id}, headers=headers)
+                
+                # Re-fetch info to see the result of that selection
+                info_resp = requests.get(f"{base_url}/torrents/info/{torrent_id}", headers=headers).json()
+
+            # 4. Determine Cache Status
+            # "downloaded" means it is cached on their servers
+            is_cached = (info_resp['status'] == 'downloaded')
+            
+            return ("supported", is_cached)
+
+        except Exception as e:
+            # Fallback for connection errors
             return ("not_supported", None)
+
+        finally:
+            # 5. CLEANUP
+            # We must delete the torrent regardless of the result so the list doesn't fill up.
+            if torrent_id:
+                try:
+                    requests.delete(f"{base_url}/torrents/delete/{torrent_id}", headers=headers)
+                except:
+                    pass
+
+    # --- HOSTER LINK HANDLING ---
     else:
         try:
             resp = requests.post(
-                "https://api.real-debrid.com/rest/1.0/unrestrict/link",
+                f"{base_url}/unrestrict/link",
                 data={"link": url},
                 headers=headers
             )
@@ -1331,36 +1563,77 @@ def check_alldebrid_cache(url):
         return None
 
     try:
+        # MAGNET CHECK
         if is_magnet(url):
-            r = requests.get(
-                "https://api.alldebrid.com/v4/magnet/instant",
-                params={"apikey": ALLDEBRID_API_TOKEN, "magnets[]": url}
+            # 1. Upload
+            r = requests.post(
+                "https://api.alldebrid.com/v4.1/magnet/upload",
+                data={
+                    "apikey": ALLDEBRID_API_TOKEN,
+                    "magnets[]": url,
+                    "agent": "OneDL"
+                },
+                timeout=10
             )
             data = r.json()
-            if data.get("status") == "success":
-                cached = data.get("data", {}).get("instant", False)
-                return ("supported", cached)
-            elif data.get("error", {}).get("code") == "MAGNET_NOT_SUPPORTED":
+
+            if data.get("status") != "success":
                 return ("not_supported", None)
-            else:
+
+            magnets = data.get("data", {}).get("magnets", [])
+            if not magnets:
+                return ("unknown", None)
+
+            magnet_id = magnets[0].get("id")
+
+            # 2. Check Status
+            r2 = requests.get(
+                "https://api.alldebrid.com/v4.1/magnet/status",
+                params={"apikey": ALLDEBRID_API_TOKEN, "id": magnet_id},
+                timeout=10
+            )
+            status_json = r2.json()
+            magnets_data = status_json.get("data", {}).get("magnets", {})
+            status_code = magnets_data.get("statusCode")
+
+            # 3. Cleanup
+            try:
+                requests.get(
+                    "https://api.alldebrid.com/v4.1/magnet/delete",
+                    params={"apikey": ALLDEBRID_API_TOKEN, "id": magnet_id},
+                    timeout=10
+                )
+            except:
+                pass
+
+            # 4 = Ready (Cached)
+            if status_code == 4:
+                return ("supported", True)
+            
+            # 0-3 = Processing (Supported, can be queued)
+            elif status_code in (0, 1, 2, 3):
                 return ("supported", False)
+            
+            else:
+                return ("not_supported", None)
+
+        # HOSTER URL CHECK
         else:
             r = requests.get(
-                "https://api.alldebrid.com/v4/link/unlock",
-                params={"apikey": ALLDEBRID_API_TOKEN, "link": url}
+                "https://api.alldebrid.com/v4.1/link/unlock",
+                params={"apikey": ALLDEBRID_API_TOKEN, "link": url, "agent": "OneDL"},
+                timeout=10
             )
             data = r.json()
 
             if data.get("status") == "success":
                 return ("supported", True)
-            elif data.get("error", {}).get("code") == "LINK_HOST_NOT_SUPPORTED":
-                return ("not_supported", None)
-            else:
-                return ("supported", False)
 
-    except Exception as e:
-        print(f"Error checking AllDebrid cache: {e}")
-        return ("not_supported", None)
+            return ("not_supported", None)
+
+    except Exception:
+        return ("unknown", None)
+
 
 
 def check_premiumize_cache(url):
@@ -1379,19 +1652,19 @@ def check_premiumize_cache(url):
                 return ("supported", response[0] is True)
             return ("supported", False)
 
-        else:
-            r = requests.get(
+        else:            
+            r = requests.post(
                 "https://www.premiumize.me/api/transfer/directdl",
-                params={"apikey": PREMIUMIZE_API_TOKEN, "src": url}
+                data={"src": url, "apikey": PREMIUMIZE_API_TOKEN},
+                timeout=10
             )
             data = r.json()
 
-            if data.get("status") == "success":
+            if r.status_code == 200 and data.get("status") == "success":
                 return ("supported", True)
-            elif data.get("message", "").lower().startswith("unsupported link"):
-                return ("not_supported", None)
+            
             else:
-                return ("supported", False)
+                return ("not_supported", None)
 
     except Exception as e:
         print(f"Error checking Premiumize cache: {e}")
@@ -1404,6 +1677,7 @@ def extract_info_hash(magnet_link):
         return match.group(1).lower()
     return None
 
+
 def check_torbox_cache(url):
     if not TORBOX_API_TOKEN:
         return None
@@ -1411,6 +1685,7 @@ def check_torbox_cache(url):
     headers = {"Authorization": f"Bearer {TORBOX_API_TOKEN}"}
 
     try:
+        # --- MAGNET HANDLING ---
         if is_magnet(url):
             info_hash = extract_info_hash(url)
             if not info_hash:
@@ -1425,12 +1700,21 @@ def check_torbox_cache(url):
 
             if resp.status_code == 200:
                 data = resp.json()
-                return ("supported", info_hash in data.get("data", {}))
+                cached_data = data.get("data", {})
+                
+                if isinstance(cached_data, list):
+                    is_cached = info_hash in cached_data
+                else:
+                    is_cached = cached_data.get(info_hash, False)
+
+                return ("supported", is_cached)
             else:
                 return ("not_supported", None)
 
+        # --- WEB/HOSTER LINK HANDLING ---
         else:
             md5_hash = hashlib.md5(url.encode()).hexdigest()
+            
             resp = requests.post(
                 "https://api.torbox.app/v1/api/webdl/checkcached",
                 json={"hashes": [md5_hash]},
@@ -1440,12 +1724,60 @@ def check_torbox_cache(url):
 
             if resp.status_code == 200:
                 data = resp.json()
-                cached = md5_hash in data.get("data", {})
-                if cached:
-                    return ("supported", True)
+                cached_data = data.get("data", {})
+                
+                if isinstance(cached_data, list):
+                    is_cached = md5_hash in cached_data
                 else:
-                    return ("unknown", False)  # ✅ could be unsupported or just not cached
+                    is_cached = cached_data.get(md5_hash, False)
+
+                if is_cached:
+                    return ("supported", True)
+                
+                try:
+                    hoster_resp = requests.get(
+                        "https://api.torbox.app/v1/api/webdl/hosters",
+                        headers=headers,
+                        timeout=10
+                    )
+                    
+                    if hoster_resp.status_code == 200:
+                        hoster_data = hoster_resp.json()
+                        hoster_list = hoster_data.get("data", [])
+                        
+                        # Parse user domain
+                        parsed_url = urllib.parse.urlparse(url)
+                        user_domain = parsed_url.netloc.lower()
+                        if user_domain.startswith("www."):
+                            user_domain = user_domain[4:]
+
+                        # Iterate through the hoster objects to find a match
+                        is_supported = False
+                        
+                        for hoster_obj in hoster_list:
+                            # Extract the list of domains for this hoster
+                            allowed_domains = hoster_obj.get("domains", [])
+                            
+                            # Check if the domain matches any of the allowed domains
+                            for domain in allowed_domains:
+                                if domain.lower() in user_domain:
+                                    is_supported = True
+                                    break
+                            if is_supported:
+                                break
+                        
+                        if is_supported:
+                            return ("supported", False)
+                        else:
+                            return ("not_supported", None)
+                    else:
+                        return ("unknown", False) 
+
+                except Exception:
+                    return ("unknown", False)
+
             else:
+                # API error on checkcached
                 return ("not_supported", None)
 
     except Exception as e:
@@ -1491,12 +1823,15 @@ def find_best_debrid(url: str = None) -> list[str]:
     print(f"{CYAN}Available options:{RESET}")
     for idx, (name, support, cached) in enumerate(services, 1):
         if support == "not_supported":
-            status = f"{RED}Not Supported{RESET}"
+            status_str = f"{RED}Not Supported{RESET}"
         elif support == "unknown":
-            status = f"{YELLOW}Not Cached | Support unknown{RESET}"
+            status_str = f"{YELLOW}Not Cached | Support unknown{RESET}"
         else:
-            status = f"{GREEN}Cached{RESET}" if cached else f"{YELLOW}Not Cached{RESET}"
-        print(f"{YELLOW}{idx}{RESET}. {name} ({status})")
+            status_str = (
+                f"{GREEN}Cached{RESET}"
+                if cached else f"{YELLOW}Not Cached{RESET}"
+            )
+        print(f"{YELLOW}{idx}{RESET}. {name} ({status_str})")
 
     choice = input("Choose a service: ")
     if not choice.isdigit():
@@ -1518,23 +1853,29 @@ def find_best_debrid(url: str = None) -> list[str]:
 
 
 def list_container_files():
-    files = [f for f in os.listdir('.') if os.path.isfile(f) and (f.endswith('.torrent') or f.endswith('.nzb'))]
+    files = [
+        f for f in os.listdir('.')
+        if os.path.isfile(f) and (f.endswith('.torrent') or f.endswith('.nzb'))
+    ]
     return files
+
 
 def main():
     print(f"{CYAN}OneDL v{VERSION}{RESET}")
     print()
-    print(f"{CYAN}Do you want to:{RESET}")
-    print(f"{YELLOW}1{RESET}. Load URLs from a file")
-    print(f"{YELLOW}2{RESET}. Paste URLs manually")
+    print(f"{CYAN}What do you want to do?{RESET}")
+    print(f"{YELLOW}1{RESET}. Paste URL(s)")
+    print(f"{YELLOW}2{RESET}. Load URLs from text file")
     if REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or PREMIUMIZE_API_TOKEN or TORBOX_API_TOKEN:
         print(f"{YELLOW}3{RESET}. Use Debrid Service")
     choice = input("Enter 1, 2 or 3: ").strip()
 
     if choice == '1':
-        urls = get_urls_from_file()
-    elif choice == '2':
         urls = get_urls_from_input()
+
+    elif choice == '2':
+        urls = get_urls_from_file()
+
     elif choice == '3':
         print()
         print(f"{CYAN}What do you want to do?{RESET}")
@@ -1596,7 +1937,14 @@ def main():
                     options.append(get_torbox_links)
                     labels.append("Torbox")
                     idx += 1
-                show_find_best = sum(bool(x) for x in [REAL_DEBRID_API_TOKEN, ALLDEBRID_API_TOKEN, PREMIUMIZE_API_TOKEN, TORBOX_API_TOKEN]) > 1
+
+                show_find_best = sum(bool(x) for x in [
+                    REAL_DEBRID_API_TOKEN,
+                    ALLDEBRID_API_TOKEN,
+                    PREMIUMIZE_API_TOKEN,
+                    TORBOX_API_TOKEN
+                ]) > 1
+
             elif ext == ".nzb":
                 if PREMIUMIZE_API_TOKEN:
                     print(f"{YELLOW}{idx}{RESET}. Premiumize.me")
@@ -1611,8 +1959,9 @@ def main():
             else:
                 print(f"{RED}Unsupported file type: {ext}{RESET}")
                 return
+
         else:
-            # Magnet/URL mode (original logic)
+            # Magnet/URL mode
             if REAL_DEBRID_API_TOKEN:
                 print(f"{YELLOW}{idx}{RESET}. Real-Debrid")
                 options.append(get_real_debrid_links)
@@ -1633,7 +1982,13 @@ def main():
                 options.append(get_torbox_links)
                 labels.append("Torbox")
                 idx += 1
-            show_find_best = sum(bool(x) for x in [REAL_DEBRID_API_TOKEN, ALLDEBRID_API_TOKEN, PREMIUMIZE_API_TOKEN, TORBOX_API_TOKEN]) > 1
+
+            show_find_best = sum(bool(x) for x in [
+                REAL_DEBRID_API_TOKEN,
+                ALLDEBRID_API_TOKEN,
+                PREMIUMIZE_API_TOKEN,
+                TORBOX_API_TOKEN
+            ]) > 1
 
         if show_find_best:
             print(f"{YELLOW}{idx}{RESET}. Find best option")
@@ -1649,6 +2004,7 @@ def main():
             print(f"{RED}Invalid choice.{RESET}")
             return
         sub_choice = int(sub_choice)
+
         if 1 <= sub_choice <= len(options):
             print()
             if submode == "2":
@@ -1657,7 +2013,6 @@ def main():
                     magnet_url = torrent_to_magnet(container_file)
                     urls = options[sub_choice - 1](magnet_url)
                 elif ext == ".nzb":
-                    # Check choice for TorBox or Premiumize
                     if options[sub_choice - 1] == get_torbox_links:
                         print(f"{CYAN}Using NZB file: {container_file}{RESET}")
                         urls = get_torbox_links_from_nzb(container_file)
@@ -1673,14 +2028,17 @@ def main():
         else:
             print(f"{RED}Invalid choice.{RESET}")
             return
+
     else:
         print(f"{RED}Invalid choice.{RESET}")
         return
 
+    # Download phase
     total = len(urls)
     for idx, url in enumerate(urls, 1):
         print(f"\n{CYAN}Download {idx} of {total}:{RESET}")
         download_file(url)
+
 
 if __name__ == '__main__':
     try:
@@ -1688,4 +2046,3 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print(f"\n{RED}Aborted by user (Ctrl+C).{RESET}")
         sys.exit(1)
-
