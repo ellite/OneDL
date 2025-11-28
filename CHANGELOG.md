@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 
 ---
+## [v.1.6.0] - 288e824
+### Fixed
+- Fix: Premiumize listing full cloud instead of transfer folder
+- Fix: alldebrid check for cache
+- Fix: Improve Real Debrid cache detection
+- Fix: Improve Torbox hoster support detection
+- Fix: Improve AllDebrid hoster support detection
+### Added
+- Feat: Added range support for all file selections (e.g., 1,3-5)
+- Feat: Show total file size during download.
+- Feat: Update alldebrid api to v4.1
+- Feat: Unified interactive file selector across all download methods
+
+---
 ## [v1.5.1] - df63d71
 ### Fixed
 - Wait for cloud download to finish to retrieve hoster files on TorBox
