@@ -34,7 +34,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
@@ -1291,6 +1291,7 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
     headers = {"Authorization": f"Bearer {TORBOX_API_TOKEN}"}
 
     try:
+        # 1. Upload the NZB
         upload_url = "https://api.torbox.app/v1/api/usenet/createusenetdownload"
         with open(nzb_path, "rb") as f:
             files = {
@@ -1309,43 +1310,103 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
 
         upload_data = upload_resp.json().get("data", {})
         usenet_id = upload_data.get("usenetdownload_id")
+        
         if not usenet_id:
-            print(f"{RED}Upload succeeded but no ID returned.{RESET}")
+            # Fallback: sometimes ID is in a different field depending on API version
+            usenet_id = upload_data.get("id")
+
+        if not usenet_id:
+            print(f"{RED}Upload succeeded but no Usenet ID returned.{RESET}")
             return []
 
-        print(f"{CYAN}Getting download info for Usenet ID {usenet_id}...{RESET}")
+        print(f"{CYAN}Usenet job started (ID: {usenet_id}). Waiting for cloud download...{RESET}")
 
-        # Retry fetching file list several times (Torbox needs a few seconds)
-        max_retries = 10
+        # 2. Poll for Status (Download -> Repair -> Extract)
+        # We assume these are the states where we should keep waiting
+        pending_states = {"downloading", "repairing", "extracting", "processing", "queued", "waiting"}
+        
         files = []
 
-        for attempt in range(1, max_retries + 1):
-            mylist_resp = requests.get(
-                "https://api.torbox.app/v1/api/usenet/mylist",
-                params={"token": TORBOX_API_TOKEN, "id": usenet_id},
-                headers=headers,
-                timeout=30
-            )
+        while True:
+            try:
+                mylist_resp = requests.get(
+                    "https://api.torbox.app/v1/api/usenet/mylist",
+                    params={"token": TORBOX_API_TOKEN, "id": usenet_id},
+                    headers=headers,
+                    timeout=30
+                )
+                
+                if mylist_resp.status_code != 200:
+                    time.sleep(5)
+                    continue
 
-            if mylist_resp.status_code == 200 and mylist_resp.json().get("success"):
-                mylist_data = mylist_resp.json().get("data", {})
-                files = mylist_data.get("files", [])
-                if files:
+                mylist_data = mylist_resp.json()
+                if not mylist_data.get("success"):
+                    time.sleep(5)
+                    continue
+
+                data = mylist_data.get("data") or {}
+                
+                # Extract status info
+                state = data.get("download_state", "unknown").lower()
+                progress = data.get("progress", 0.0)
+                speed = data.get("download_speed", 0)
+                files = data.get("files", [])
+
+                # --- SUCCESS CONDITION ---
+                # If state is finished, or we are cached and have files
+                if state == "finished" or (state == "cached" and files):
+                    print(f"\n{GREEN}Cloud download complete.{RESET}")
                     break
+
+                # --- FAILURE CONDITION ---
+                if state == "error" or state == "stalled":
+                    print(f"\n{RED}Usenet download failed. State: {state}{RESET}")
+                    return []
+
+                # --- PROGRESS BAR ---
+                if state in pending_states:
+                    bar_len = 30
+                    filled = int(progress * bar_len)
+                    bar = "#" * filled
+                    bar = bar.ljust(bar_len)
+                    
+                    # Convert speed to MB/s
+                    speed_mb = f"{speed / (1024 * 1024):.2f} MB/s" if speed else "—"
+                    
+                    # Visual status mapping (e.g. "extracting" might not have speed)
+                    status_display = state.capitalize()
+
+                    sys.stdout.write(
+                        f"\r{YELLOW}{status_display}...{RESET} "
+                        f"[{bar}] {GREEN}{int(progress*100)}%{RESET} :: {CYAN}{speed_mb}{RESET}   "
+                    )
+                    sys.stdout.flush()
+                    
+                    time.sleep(3)
                 else:
-                    print(f"{YELLOW}No files found yet, retrying ({attempt}/{max_retries})...{RESET}")
-            else:
-                print(f"{RED}Failed to query mylist for NZB (attempt {attempt}/{max_retries}).{RESET}")
+                    # Unknown state (maybe "completed"?), check if we have files
+                    if files:
+                        print(f"\n{GREEN}Download seems finished (State: {state}).{RESET}")
+                        break
+                    else:
+                        print(f"\n{RED}Unknown state with no files: {state}{RESET}")
+                        return []
 
-            time.sleep(3)
+            except KeyboardInterrupt:
+                print(f"\n{RED}Aborted by user.{RESET}")
+                return []
+            except Exception as e:
+                # Network glitch? Just wait and retry
+                time.sleep(3)
+                continue
 
+        # 3. File Selection (Unified)
         if not files:
-            print(f"{RED}No files found in mylist response after retries.{RESET}")
+            print(f"{RED}No files found in metadata.{RESET}")
             return []
 
-        print(f"{GREEN}Found {len(files)} file(s).{RESET}")
-
-        # Build standardized display entries for unified selection
+        # Build display entries
         display_files = []
         for f in files:
             display_files.append({
@@ -1353,9 +1414,9 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
                 "size": f.get("size", 0)
             })
 
-        # Unified selection (supports ranges + commas + 'all')
+        # Interactive Selector
         selected_indexes = select_files_interactive(
-            display_files,
+            display_files, 
             "Select NZB files to download"
         )
 
@@ -1366,36 +1427,41 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
         print(f"{GREEN}Requesting download links...{RESET}")
         urls = []
 
-        # Request DL for selected file IDs
+        # 4. Get Links
         for idx in selected_indexes:
             f = files[idx]
             fid = f.get("id")
             name = f.get("name", "Unknown")
 
-            dl_resp = requests.get(
-                "https://api.torbox.app/v1/api/usenet/requestdl",
-                params={"token": TORBOX_API_TOKEN, "usenet_id": usenet_id, "file_id": fid},
-                headers=headers,
-                timeout=30
-            )
+            # Try/Except block for individual link fetching
+            try:
+                dl_resp = requests.get(
+                    "https://api.torbox.app/v1/api/usenet/requestdl",
+                    params={"token": TORBOX_API_TOKEN, "usenet_id": usenet_id, "file_id": fid},
+                    headers=headers,
+                    timeout=30
+                )
 
-            if dl_resp.status_code == 200 and dl_resp.json().get("success"):
-                url = dl_resp.json().get("data")
-                if url:
-                    print(f"{YELLOW}{name}:{RESET} {url}")
-                    urls.append(url)
+                if dl_resp.status_code == 200 and dl_resp.json().get("success"):
+                    url = dl_resp.json().get("data")
+                    if url:
+                        print(f"{YELLOW}{name}:{RESET} {url}")
+                        urls.append(url)
+                    else:
+                        print(f"{RED}No URL returned for {name}.{RESET}")
                 else:
-                    print(f"{RED}No URL returned for {name}.{RESET}")
-            else:
-                print(f"{RED}Failed to get download link for {name}.{RESET}")
+                    # Try to read error message
+                    err = dl_resp.json().get("error", "Unknown error")
+                    print(f"{RED}Failed to get link for {name}: {err}{RESET}")
+
+            except Exception as e:
+                print(f"{RED}Error fetching link for {name}: {e}{RESET}")
 
         return urls
 
     except Exception as e:
-        print(f"{RED}Exception during NZB upload or download: {e}{RESET}")
+        print(f"{RED}Critical Exception during NZB workflow: {e}{RESET}")
         return []
-
-
 
 def get_all_files_with_links(token, folder_id):
     def fetch_folder_contents(folder_id):
