@@ -29,7 +29,7 @@ Whether you're pasting a magnet link or unlocking hoster URLs, OneDL handles eve
 
 ### 1. Install Python
 
-Make sure **Python 3** is installed:
+Make sure **Python 3.10** or newer is installed:
 
 ```bash
 python3 --version
