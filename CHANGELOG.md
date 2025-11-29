@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ---
+##  [v.1.6.1] - 95eb7d3
+### Fixed
+- Fix: Torbox nzb not waiting for cloud download to complete
+
+---
 ## [v.1.6.0] - 288e824
 ### Fixed
 - Fix: Premiumize listing full cloud instead of transfer folder
