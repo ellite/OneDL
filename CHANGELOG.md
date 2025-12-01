@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+##  [v.1.6.2] - b174315 / 3788449
+### Fixed
+- Fix: Adding magnets to Alldebrid
+
 ---
 ##  [v.1.6.1] - 95eb7d3
 ### Fixed
