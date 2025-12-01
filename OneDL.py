@@ -34,7 +34,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 REAL_DEBRID_API_TOKEN = ""
 ALLDEBRID_API_TOKEN = ""
