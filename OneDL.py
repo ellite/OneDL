@@ -461,180 +461,159 @@ def get_real_debrid_links(url=None):
         print(f"{RED}Hoster not supported or failed.{RESET}")
 
 
+def parse_alldebrid_files(files_list):
+    """
+    Recursively extract files with links from AllDebrid's nested structure.
+    AllDebrid uses 'e' for folder entries and 'l' for file links.
+    """
+    flat_files = []
+    for item in files_list:
+        # If it has a link ('l'), it's a download-ready file
+        if "l" in item:
+            flat_files.append({
+                "name": item.get("n", "Unknown"),
+                "size": item.get("s", 0),
+                "link": item.get("l")
+            })
+        # If it has entries ('e'), it's a folder -> recurse down
+        elif "e" in item:
+            flat_files.extend(parse_alldebrid_files(item["e"]))
+    return flat_files
+
 def get_alldebrid_links(url=None):
     token = ALLDEBRID_API_TOKEN or input(f"{CYAN}Enter your AllDebrid API token:{RESET} ").strip()
     if not url:
         url = input(f"{CYAN}Paste your magnet or hoster URL:{RESET} ").strip()
 
     if is_magnet(url):
-        # Magnet logic
+        # 1. UPLOAD MAGNET
         resp = requests.post(
             "https://api.alldebrid.com/v4/magnet/upload",
-            params={"agent": "dl-script", "apikey": token, "magnets[]": url}
+            data={"agent": "dl-script", "apikey": token, "magnets[]": url}
         )
-        try:
-            data = resp.json()
-        except Exception:
-            text = resp.text
-            parts = []
-            if '}{' in text:
-                split = text.split('}{')
-                for i, part in enumerate(split):
-                    if i == 0:
-                        parts.append(part + '}')
-                    elif i == len(split) - 1:
-                        parts.append('{' + part)
-                    else:
-                        parts.append('{' + part + '}')
-            else:
-                parts = [text]
-
-            for part in parts:
-                try:
-                    obj = json.loads(part)
-                    if "error" in obj or "message" in obj:
-                        print(f"{RED}AllDebrid error:{RESET} {obj.get('error','')}")
-                        print(f"{YELLOW}{obj.get('message','')}{RESET}")
-                except:
-                    continue
-            return []
+        data = resp.json()
 
         if data.get("status") != "success":
-            print(f"{RED}Failed to add magnet.{RESET}")
+            print(f"{RED}Failed to add magnet: {data.get('error', {}).get('message', 'Unknown error')}{RESET}")
             return []
 
+        # AllDebrid upload response 'magnets' is a list
         magnet_id = data["data"]["magnets"][0]["id"]
-
-        # Wait for magnet to be ready
-        selection_sent = False
+        
+        # 2. POLL STATUS
         while True:
-            info = requests.get(
+            status_resp = requests.get(
                 "https://api.alldebrid.com/v4.1/magnet/status",
                 params={"agent": "dl-script", "apikey": token, "id": magnet_id}
             ).json()
 
-            if info.get("status") == "success":
-                magnet = info["data"]["magnets"]
+            if status_resp.get("status") != "success":
+                print(f"{RED}Error fetching status.{RESET}")
+                return []
 
-                if not isinstance(magnet, dict):
-                    print(f"{RED}Unexpected magnet response.{RESET}")
+            # For ID requests, 'magnets' is usually a dict, but safety check for list
+            magnet = status_resp["data"]["magnets"]
+            if isinstance(magnet, list):
+                magnet = magnet[0]
+
+            status_code = magnet.get("statusCode")
+            status_msg = magnet.get("status", "Unknown")
+
+            # --- CASE A: READY (Links available) ---
+            if status_code == 4:
+                # FIXED: Extract links recursively from the 'files' tree
+                files_tree = magnet.get("files", [])
+                
+                # Use our new helper function to flatten the nested JSON
+                available_files = parse_alldebrid_files(files_tree)
+                
+                if not available_files:
+                    print(f"{RED}Torrent is ready but returned no links/files.{RESET}")
+                    # Debug print to help identify structure issues
+                    # print(json.dumps(magnet, indent=3)) 
                     return []
 
-                # Waiting for file selection
-                if magnet["status"] == "waiting_files":
-                    if not selection_sent:
-                        files = magnet["files"]
+                print(f"\n{GREEN}Torrent Ready! Found {len(available_files)} links.{RESET}")
 
-                        display_files = []
-                        for f in files:
-                            path = f["path"].lstrip("/\\")
-                            size_bytes = f.get("size", 0)
-                            display_files.append({"name": path, "size": size_bytes})
+                # Build display list for the Unified Selector
+                display_files = []
+                for f in available_files:
+                    display_files.append({
+                        "name": f["name"],
+                        "size": f["size"]
+                    })
 
-                        print()
-                        selected = select_files_interactive(
-                            display_files,
-                            "Select files in torrent"
-                        )
+                # 3. SELECT FILES (Client-Side)
+                selected_indexes = select_files_interactive(
+                    display_files, 
+                    "Select files to download"
+                )
 
-                        if not selected:
-                            print(f"{RED}No files selected.{RESET}")
-                            return []
-
-                        file_ids = [str(files[i]["id"]) for i in selected]
-
-                        requests.post(
-                            "https://api.alldebrid.com/v4.1/magnet/selectFiles",
-                            params={
-                                "agent": "dl-script",
-                                "apikey": token,
-                                "id": magnet_id,
-                                "files": ",".join(file_ids)
-                            }
-                        )
-
-                        print(f"{GREEN}Selection sent, waiting for AllDebrid to process...{RESET}")
-                        selection_sent = True
-                    else:
-                        print(f"{YELLOW}Waiting for AllDebrid to process your selection...{RESET}")
-                    time.sleep(3)
-
-                # Ready to provide unlocked links
-                elif magnet["status"].lower() == "ready":
-                    raw_links = [l["link"] for l in magnet.get("links", []) if "link" in l]
-
-                    if not raw_links:
-                        print(f"{RED}No links returned by AllDebrid.{RESET}")
-                        return []
-
-                    # Unrestrict via unlock endpoint
-                    unlocked = []
-                    for l in raw_links:
-                        r = requests.get(
-                            "https://api.alldebrid.com/v4.1/link/unlock",
-                            params={"agent": "dl-script", "apikey": token, "link": l}
-                        ).json()
-                        if r.get("status") == "success" and "link" in r.get("data", {}):
-                            unlocked.append(r["data"]["link"])
-                        else:
-                            print(f"{RED}Failed to unlock link:{RESET} {YELLOW}{l}{RESET}")
-
-                    if not unlocked:
-                        print(f"{RED}No links were unlocked.{RESET}")
-                        return []
-
-                    # Build improved display list using filenames
-                    display_links = []
-                    for link in unlocked:
-                        # Extract filename from URL
-                        filename = link.split("/")[-1] if "/" in link else link
-                        # Clean query parameters if present
-                        filename = filename.split("?")[0]
-                        display_links.append({"name": filename or link, "size": 0})
-
-                    selected = select_files_interactive(
-                        display_links,
-                        "Select links to download"
-                    )
-
-                    return [unlocked[i] for i in selected]
-
-                elif magnet["status"] == "error":
-                    print(f"{RED}Magnet error.{RESET}")
+                if not selected_indexes:
+                    print(f"{RED}No files selected.{RESET}")
                     return []
 
-                elif magnet["status"] == "Downloading":
-                    downloaded = magnet.get("downloaded", 0)
-                    size = magnet.get("size", 0)
-                    percent = int(downloaded * 100 // size) if size else 0
-                    speed = magnet.get("downloadSpeed", 0)
-                    seeders = magnet.get("seeders", 0)
+                final_urls = []
+                print(f"{CYAN}Unlocking selected links...{RESET}")
 
-                    # Progress bar
-                    bar_length = 30
-                    bar = '#' * int(percent * bar_length // 100)
-                    bar = bar.ljust(bar_length)
+                # 4. UNLOCK SELECTED LINKS
+                for idx in selected_indexes:
+                    file_info = available_files[idx]
+                    link_to_unlock = file_info["link"]
+                    
+                    unlock_resp = requests.get(
+                        "https://api.alldebrid.com/v4.1/link/unlock",
+                        params={"agent": "dl-script", "apikey": token, "link": link_to_unlock}
+                    ).json()
 
-                    if speed >= 1024 * 1024:
-                        speed_str = f"{speed/1024/1024:.2f} MB/s"
-                    elif speed >= 1024:
-                        speed_str = f"{speed/1024:.1f} KB/s"
+                    if unlock_resp.get("status") == "success":
+                        unlocked_link = unlock_resp["data"].get("link")
+                        if unlocked_link:
+                            final_urls.append(unlocked_link)
+                            print(f"{GREEN}Unlocked:{RESET} {file_info['name']}")
                     else:
-                        speed_str = f"{speed:.0f} B/s"
+                         err = unlock_resp.get("error", {}).get("message", "Unknown")
+                         print(f"{RED}Failed to unlock:{RESET} {file_info['name']} ({err})")
 
-                    sys.stdout.write(
-                        f"\r{YELLOW}Downloading to cloud...{RESET} "
-                        f"[{YELLOW}{bar}{RESET}] "
-                        f"{GREEN}{percent}%{RESET} | "
-                        f"Speed: {CYAN}{speed_str}{RESET} | "
-                        f"Seeders: {GREEN}{seeders}{RESET}   "
-                    )
-                    sys.stdout.flush()
-                    time.sleep(3)
+                return final_urls
 
+            # --- CASE B: DOWNLOADING / QUEUED ---
+            elif status_code in (0, 1, 2, 3):
+                downloaded = magnet.get("downloaded", 0)
+                size = magnet.get("size", 1)
+                speed = magnet.get("downloadSpeed", 0)
+                seeders = magnet.get("seeders", 0)
+                
+                percent = (downloaded / size) * 100 if size > 0 else 0
+                
+                if speed > 1024*1024: speed_str = f"{speed/1024/1024:.2f} MB/s"
+                elif speed > 1024: speed_str = f"{speed/1024:.0f} KB/s"
+                else: speed_str = f"{speed} B/s"
+
+                bar_len = 30
+                filled = int(percent / 100 * bar_len)
+                bar = "#" * filled + "-" * (bar_len - filled)
+
+                sys.stdout.write(
+                    f"\r{YELLOW}{status_msg}...{RESET} "
+                    f"[{bar}] {GREEN}{percent:.1f}%{RESET} "
+                    f"| {CYAN}{speed_str}{RESET} | S: {seeders}   "
+                )
+                sys.stdout.flush()
+                time.sleep(2)
+
+            # --- CASE C: ERROR ---
+            elif status_code > 4:
+                error_code = magnet.get("errorCode")
+                print(f"\n{RED}Magnet Error {error_code}: {status_msg}{RESET}")
+                requests.get(
+                    "https://api.alldebrid.com/v4.1/magnet/delete",
+                    params={"agent": "dl-script", "apikey": token, "id": magnet_id}
+                )
+                return []
+                
             else:
-                print(f"{YELLOW}Waiting for AllDebrid...{RESET}")
-                time.sleep(3)
+                time.sleep(2)
 
     elif "mega.nz/folder/" in url and "/file/" not in url:
         # Extract MEGA folder contents
@@ -689,7 +668,6 @@ def get_alldebrid_links(url=None):
 
         print(f"{RED}Hoster not supported or failed.{RESET}")
         return []
-
 
 def get_premiumize_links(url=None):
     token = PREMIUMIZE_API_TOKEN or input(f"{CYAN}Enter your Premiumize.me API token:{RESET} ").strip()
