@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+##  [v.1.7.0] - 536c837
+### Fixed
+- Fix: Fix cache check for mega folders on RealDebrid
+- Fix: Fix cache check for mega folders on AllDebrid
+### Added
+- Feat: Add support to Debrid-Link
+
 ##  [v.1.6.2] - b174315 / 3788449
 ### Fixed
 - Fix: Adding magnets to Alldebrid
