@@ -4,8 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ##  [v.1.7.0] - 536c837
 ### Fixed
-- Fix: Fix cache check for mega folders on RealDebrid
-- Fix: Fix cache check for mega folders on AllDebrid
+- Fix: Cache check for mega folders on RealDebrid
+- Fix: Cache check for mega folders on AllDebrid
 ### Added
 - Feat: Add support to Debrid-Link
 
