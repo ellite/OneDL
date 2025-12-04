@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+##  [v.1.8.0] - 1e52873
+### Added
+- Feat: Extract API Keys to a configuration file so updates don't override them
+
 ##  [v.1.7.0] - 536c837
 ### Fixed
 - Fix: Cache check for mega folders on RealDebrid
