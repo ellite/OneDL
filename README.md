@@ -53,6 +53,7 @@ Download `OneDL.py` directly from GitHub:
 
 ```bash
 curl -o OneDL.py https://raw.githubusercontent.com/ellite/OneDL/refs/heads/main/OneDL.py
+curl -o ~/.onedl.conf https://raw.githubusercontent.com/ellite/OneDL/refs/heads/main/.onedl.conf
 chmod +x OneDL.py
 ```
 
@@ -68,6 +69,14 @@ Now you can simply run:
 
 ```bash
 onedl
+```
+
+---
+
+## 🔄 Update
+
+```bash
+curl -o OneDL.py https://raw.githubusercontent.com/ellite/OneDL/refs/heads/main/OneDL.py
 ```
 
 ---
@@ -95,13 +104,24 @@ onedl
 
 ## 🔐 API Configuration
 
-At the top of the `OneDL.py` script, configure your API tokens:
+OneDL uses a configuration file to store your API keys securely. This file is named .onedl.conf and is usually located in your home directory.
 
-```python
-REAL_DEBRID_API_TOKEN = "your_real_debrid_token"
-ALLDEBRID_API_TOKEN = "your_alldebrid_token"
-PREMIUMIZE_API_TOKEN = "your_premiumize_token"
-TORBOX_API_TOKEN = "your_torbox_token"
+1. Open the configuration file
+
+```bash
+nano ~/.onedl.conf
+```
+
+2. Paste your API keys inside the quotes for the services you want to use:
+
+```json
+{
+  "REAL_DEBRID_API_TOKEN": "your_token_here",
+  "ALLDEBRID_API_TOKEN": "your_token_here",
+  "PREMIUMIZE_API_TOKEN": "your_token_here",
+  "TORBOX_API_TOKEN": "your_token_here",
+  "DEBRID_LINK_API_TOKEN": "your_token_here"
+}
 ```
 
 Tokens are optional — just set the ones you have access to.
