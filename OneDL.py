@@ -4,19 +4,19 @@
 OneDL - Universal Debrid & Downloader Tool
 
 OneDL is a command-line tool to simplify downloading from hosters, torrents, cloud debrid services, direct HTTP(S) links, and container files (.torrent & .nzb).
-It supports Real-Debrid, AllDebrid, Premiumize.me, and Torbox, allowing you to resolve direct links from magnets,
+It supports Real-Debrid, AllDebrid, Premiumize.me, Torbox and Debrid-Link, allowing you to resolve direct links from magnets,
 hoster URLs, MEGA folders, standard HTTP(S) links, or by uploading .torrent and .nzb files, and download them.
 
 USAGE:
     1. Run the script from the folder where you want your downloaded files: onedl
     2. Choose to load URLs from a file, paste them manually, or use a debrid service.
-    3. For debrid services, select Real-Debrid, AllDebrid, Premiumize.me, Torbox or let OneDL find the best option.
+    3. For debrid services, select Real-Debrid, AllDebrid, Premiumize.me, Torbox, Debrid-Link or let OneDL find the best option.
     4. Paste your magnet, hoster, MEGA, HTTP(S) URL, or upload a .torrent/.nzb file when prompted.
     5. Select files if needed, and OneDL will resolve and download them for you.
 
 FEATURES:
     - Supports magnet links, hoster URLs, MEGA folders, direct HTTP(S) links, and container files (.torrent & .nzb).
-    - Integrates with Real-Debrid, AllDebrid, Premiumize.me and Torbox.
+    - Integrates with Real-Debrid, AllDebrid, Premiumize.me, Torbox and Debrid-Link.
     - Shows download progress bars with speed and seeders.
     - Lets you pick files from torrents, NZBs, or containers.
     - Colorful, user-friendly terminal output.
@@ -34,12 +34,13 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 
-REAL_DEBRID_API_TOKEN = ""
-ALLDEBRID_API_TOKEN = ""
-PREMIUMIZE_API_TOKEN = ""
-TORBOX_API_TOKEN = ""
+REAL_DEBRID_API_TOKEN = "" # https://real-debrid.com/devices
+ALLDEBRID_API_TOKEN = "" # https://alldebrid.com/apikeys/
+PREMIUMIZE_API_TOKEN = "" # https://www.premiumize.me/accoun
+TORBOX_API_TOKEN = "" # https://torbox.app/settings?section=account
+DEBRID_LINK_API_TOKEN = "" # https://debrid-link.com/webapp/apikey
 
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
@@ -460,7 +461,6 @@ def get_real_debrid_links(url=None):
             return [data["download"]]
         print(f"{RED}Hoster not supported or failed.{RESET}")
 
-
 def parse_alldebrid_files(files_list):
     """
     Recursively extract files with links from AllDebrid's nested structure.
@@ -668,6 +668,7 @@ def get_alldebrid_links(url=None):
 
         print(f"{RED}Hoster not supported or failed.{RESET}")
         return []
+
 
 def get_premiumize_links(url=None):
     token = PREMIUMIZE_API_TOKEN or input(f"{CYAN}Enter your Premiumize.me API token:{RESET} ").strip()
@@ -1096,7 +1097,7 @@ def get_torbox_links(url=None):
 
         return links
 
-    #  HOSTER MODE  (non-magnet)
+    #  HOSTER MODE
     md5_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
 
     check_resp = requests.post(
@@ -1441,6 +1442,200 @@ def get_torbox_links_from_nzb(nzb_path: str) -> list[str]:
         print(f"{RED}Critical Exception during NZB workflow: {e}{RESET}")
         return []
 
+def get_debrid_link_links(url=None):
+    token = DEBRID_LINK_API_TOKEN or input(f"{CYAN}Enter your Debrid-Link API token:{RESET} ").strip()
+    if not url:
+        url = input(f"{CYAN}Paste your magnet or hoster URL:{RESET} ").strip()
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # --- 1. MAGNET / SEEDBOX MODE ---
+    if is_magnet(url):
+        print(f"{CYAN}Adding to Debrid-Link Seedbox...{RESET}")
+        
+        # Add Magnet
+        add_resp = requests.post(
+            "https://debrid-link.com/api/v2/seedbox/add",
+            data={"url": url, "async": "true"},
+            headers=headers
+        )
+        add_data = add_resp.json()
+
+        if not add_data.get("success"):
+            error_msg = add_data.get("error", "Unknown error")
+            print(f"{RED}Failed to add magnet: {error_msg}{RESET}")
+            return []
+
+        torrent_id = add_data["value"]["id"]
+        print(f"{GREEN}Torrent added (ID: {torrent_id}). Waiting for cloud download...{RESET}")
+
+        # Poll for Status
+        files = []
+        while True:
+            list_resp = requests.get(
+                "https://debrid-link.com/api/v2/seedbox/list",
+                headers=headers
+            )
+            list_data = list_resp.json()
+            
+            if not list_data.get("success"):
+                time.sleep(2)
+                continue
+
+            # Find our torrent
+            torrents = list_data.get("value", [])
+            if isinstance(torrents, dict): 
+                torrents = torrents.get("torrents", [])
+                
+            current = next((t for t in torrents if t["id"] == torrent_id), None)
+
+            if not current:
+                print(f"{RED}Torrent ID not found in list.{RESET}")
+                return []
+
+            status_code = current.get("downloadPercent", 0)
+            
+            if status_code == 100:
+                print(f"\n{GREEN}Cloud download complete!{RESET}")
+                files = current.get("files", [])
+                break
+            else:
+                speed = current.get("downloadSpeed", 0)
+                peers = current.get("peersConnected", 0)
+                
+                if speed > 1024*1024: speed_str = f"{speed/1024/1024:.2f} MB/s"
+                elif speed > 1024: speed_str = f"{speed/1024:.0f} KB/s"
+                else: speed_str = f"{speed} B/s"
+
+                bar_len = 30
+                filled = int(status_code / 100 * bar_len)
+                bar = "#" * filled + "-" * (bar_len - filled)
+
+                sys.stdout.write(
+                    f"\r{YELLOW}Downloading to cloud...{RESET} "
+                    f"[{bar}] {GREEN}{status_code}%{RESET} "
+                    f"| {CYAN}{speed_str}{RESET} | Peers: {peers}   "
+                )
+                sys.stdout.flush()
+                time.sleep(3)
+
+        # File Selection
+        if not files:
+            print(f"{RED}No files found in torrent.{RESET}")
+            return []
+
+        display_files = []
+        for f in files:
+            display_files.append({
+                "name": f.get("name", "Unknown"),
+                "size": f.get("size", 0)
+            })
+
+        selected_indexes = select_files_interactive(
+            display_files, 
+            "Select files to download"
+        )
+
+        final_urls = []
+        for i in selected_indexes:
+            dl_url = files[i].get("downloadUrl")
+            if dl_url:
+                final_urls.append(dl_url)
+        
+        return final_urls
+
+    # --- 2. MEGA FOLDER MODE ---
+    elif "mega.nz/folder/" in url and "/file/" not in url:
+        print(f"{CYAN}Extracting MEGA folder contents...{RESET}")
+        
+        # Use existing helper to get individual links
+        mega_links = extract_mega_files_from_folder(url)
+        
+        if not mega_links:
+            print(f"{RED}No files found in MEGA folder.{RESET}")
+            return []
+
+        # Build display list for selector
+        display_files = [{"name": link, "size": 0} for link in mega_links]
+
+        # Interactive Selection
+        selected_indexes = select_files_interactive(
+            display_files, 
+            "Select files from MEGA folder"
+        )
+
+        if not selected_indexes:
+            return []
+
+        print(f"{CYAN}Unlocking selected files...{RESET}")
+        final_urls = []
+        
+        # Iterate over selected links and unlock them one by one
+        for idx in selected_indexes:
+            target_link = mega_links[idx]
+            
+            resp = requests.post(
+                "https://debrid-link.com/api/v2/downloader/add",
+                data={"url": target_link},
+                headers=headers
+            )
+            data = resp.json()
+
+            if data.get("success"):
+                val = data.get("value")
+                # Handle list or dict return
+                if isinstance(val, list) and val:
+                    dl_link = val[0].get("downloadUrl")
+                    name = val[0].get("name")
+                elif isinstance(val, dict):
+                    dl_link = val.get("downloadUrl")
+                    name = val.get("name")
+                else:
+                    dl_link = None
+                    name = "Unknown"
+
+                if dl_link:
+                    print(f"{GREEN}Unlocked:{RESET} {name}")
+                    final_urls.append(dl_link)
+                else:
+                    print(f"{RED}Unlocked but no link found for:{RESET} {target_link}")
+            else:
+                 err = data.get("error", "Unknown error")
+                 print(f"{RED}Failed to unlock:{RESET} {target_link} ({err})")
+        
+        return final_urls
+
+    # --- 3. STANDARD HOSTER LINK MODE ---
+    else:
+        print(f"{CYAN}Unlocking hoster link...{RESET}")
+        
+        resp = requests.post(
+            "https://debrid-link.com/api/v2/downloader/add",
+            data={"url": url},
+            headers=headers
+        )
+        data = resp.json()
+
+        if data.get("success"):
+            val = data.get("value")
+            if isinstance(val, list) and val:
+                link = val[0].get("downloadUrl")
+                name = val[0].get("name")
+            elif isinstance(val, dict):
+                link = val.get("downloadUrl")
+                name = val.get("name")
+            else:
+                link = None
+                name = "Unknown"
+
+            if link:
+                print(f"{GREEN}Unlocked:{RESET} {name}")
+                print(f"{YELLOW}{link}{RESET}")
+                return [link]
+        
+        print(f"{RED}Failed to resolve link.{RESET}")
+        return []
+
 def get_all_files_with_links(token, folder_id):
     def fetch_folder_contents(folder_id):
         resp = requests.get(
@@ -1538,7 +1733,6 @@ def check_real_debrid_cache(url):
                 headers=headers
             )
             
-            # Handle API errors or Unsupported hosts
             if add_resp.status_code != 201:
                 data = add_resp.json()
                 if data.get("error") == "hoster_unsupported":
@@ -1547,42 +1741,46 @@ def check_real_debrid_cache(url):
 
             torrent_id = add_resp.json()['id']
 
-            # 2. Get Info to see file list
+            # 2. Get Info
             info_resp = requests.get(f"{base_url}/torrents/info/{torrent_id}", headers=headers).json()
 
-            # 3. Smart Selection
-            # If status is "waiting_files_selection", we must select a file to trigger the cache check.
-            # We select the LARGEST file to avoid false negatives from tiny sample files.
+            # 3. Smart Selection (Select largest file to force check)
             if info_resp['status'] == 'waiting_files_selection':
                 files = info_resp['files']
-                # Sort by size (bytes) descending and pick the first one
                 largest_file = sorted(files, key=lambda x: x['bytes'], reverse=True)[0]
                 file_id = str(largest_file['id'])
                 
-                # Post the selection
                 requests.post(f"{base_url}/torrents/selectFiles/{torrent_id}", data={"files": file_id}, headers=headers)
-                
-                # Re-fetch info to see the result of that selection
                 info_resp = requests.get(f"{base_url}/torrents/info/{torrent_id}", headers=headers).json()
 
             # 4. Determine Cache Status
-            # "downloaded" means it is cached on their servers
             is_cached = (info_resp['status'] == 'downloaded')
-            
             return ("supported", is_cached)
 
         except Exception as e:
-            # Fallback for connection errors
             return ("not_supported", None)
 
         finally:
-            # 5. CLEANUP
-            # We must delete the torrent regardless of the result so the list doesn't fill up.
             if torrent_id:
                 try:
                     requests.delete(f"{base_url}/torrents/delete/{torrent_id}", headers=headers)
                 except:
                     pass
+
+    # --- NEW: MEGA FOLDER HANDLING ---
+    elif "mega.nz/folder/" in url and "/file/" not in url:
+        # We cannot check a folder directly. We must check one of the files inside.
+        try:
+            links = extract_mega_files_from_folder(url)
+            if not links:
+                return ("not_supported", None)
+            
+            # RECURSION: Check the first file link using this same function
+            # The first link will be a file link, so it will fall into the 'else' block below.
+            return check_real_debrid_cache(links[0])
+            
+        except Exception:
+            return ("not_supported", None)
 
     # --- HOSTER LINK HANDLING ---
     else:
@@ -1607,7 +1805,7 @@ def check_alldebrid_cache(url):
         return None
 
     try:
-        # MAGNET CHECK
+        # --- MAGNET CHECK ---
         if is_magnet(url):
             # 1. Upload
             r = requests.post(
@@ -1661,7 +1859,21 @@ def check_alldebrid_cache(url):
             else:
                 return ("not_supported", None)
 
-        # HOSTER URL CHECK
+        # --- NEW: MEGA FOLDER HANDLING ---
+        elif "mega.nz/folder/" in url and "/file/" not in url:
+            # AllDebrid cannot unlock a folder URL directly for cache checking.
+            # We must extract the files and check the first one.
+            try:
+                links = extract_mega_files_from_folder(url)
+                if not links:
+                    return ("not_supported", None)
+                
+                # RECURSION: Check the first file link using this same function
+                return check_alldebrid_cache(links[0])
+            except Exception:
+                return ("not_supported", None)
+
+        # --- HOSTER URL CHECK ---
         else:
             r = requests.get(
                 "https://api.alldebrid.com/v4.1/link/unlock",
@@ -1677,7 +1889,6 @@ def check_alldebrid_cache(url):
 
     except Exception:
         return ("unknown", None)
-
 
 
 def check_premiumize_cache(url):
@@ -1828,6 +2039,82 @@ def check_torbox_cache(url):
         print(f"Error checking TorBox cache: {e}")
         return ("not_supported", None)
 
+def check_debrid_link_cache(url):
+    if not DEBRID_LINK_API_TOKEN:
+        return None
+
+    headers = {"Authorization": f"Bearer {DEBRID_LINK_API_TOKEN}"}
+
+    try:
+        # --- MAGNET LINK CHECK ---
+        if is_magnet(url):
+            # 1. Add the magnet (this is the only way to know if it's cached now)
+            add_resp = requests.post(
+                "https://debrid-link.com/api/v2/seedbox/add",
+                data={"url": url, "async": "false"}, # async=false attempts to give us info immediately
+                headers=headers,
+                timeout=15
+            )
+            add_data = add_resp.json()
+            
+            # If add failed, it's not supported
+            if not add_data.get("success"):
+                return ("not_supported", None)
+
+            # 2. Check the status immediately
+            torrent = add_data.get("value", {})
+            torrent_id = torrent.get("id")
+            progress = torrent.get("downloadPercent", 0)
+            
+            # If "downloadPercent" is missing in the add response, we might need a quick list check
+            if "downloadPercent" not in torrent and torrent_id:
+                 list_resp = requests.get("https://debrid-link.com/api/v2/seedbox/list", headers=headers)
+                 if list_resp.status_code == 200:
+                     torrents_list = list_resp.json().get("value", [])
+                     # Handle pagination dict if present
+                     if isinstance(torrents_list, dict): 
+                         torrents_list = torrents_list.get("torrents", [])
+                         
+                     found_torrent = next((t for t in torrents_list if t["id"] == torrent_id), None)
+                     if found_torrent:
+                         progress = found_torrent.get("downloadPercent", 0)
+
+            # 3. Determine Cache Status (100% means cached)
+            is_cached = (progress == 100)
+
+            # 4. Cleanup: Delete the check-torrent so we don't spam the user's list
+            # We only delete if we are just checking. If the user actually selects it later, 
+            # the main download function will add it again.
+            if torrent_id:
+                try:
+                    requests.delete(
+                        f"https://debrid-link.com/api/v2/seedbox/{torrent_id}/remove", 
+                        headers=headers
+                    )
+                except:
+                    pass
+
+            return ("supported", is_cached)
+
+        # --- HOSTER LINK CHECK ---
+        else:
+            # Same logic as before for hosters
+            resp = requests.post(
+                "https://debrid-link.com/api/v2/downloader/add",
+                data={"url": url},
+                headers=headers,
+                timeout=15
+            )
+            data = resp.json()
+
+            if data.get("success"):
+                return ("supported", True)
+            else:
+                return ("not_supported", None)
+
+    except Exception as e:
+        print(f"Error checking Debrid-Link cache: {e}")
+        return ("unknown", None)
 
 def find_best_debrid(url: str = None) -> list[str]:
     if not url:
@@ -1858,6 +2145,12 @@ def find_best_debrid(url: str = None) -> list[str]:
         if status:
             support, cached = status
             services.append(("Torbox", support, cached))
+
+    if DEBRID_LINK_API_TOKEN:
+        status = check_debrid_link_cache(url)
+        if status:
+            support, cached = status
+            services.append(("Debrid-Link", support, cached))        
 
     if not services:
         print("No debrid services available or none support this URL.")
@@ -1893,6 +2186,8 @@ def find_best_debrid(url: str = None) -> list[str]:
         return get_premiumize_links(url)
     elif name == "Torbox":
         return get_torbox_links(url)
+    elif name == "Debrid-Link":
+        return get_debrid_link_links(url)
     return []
 
 
@@ -1981,12 +2276,18 @@ def main():
                     options.append(get_torbox_links)
                     labels.append("Torbox")
                     idx += 1
+                if DEBRID_LINK_API_TOKEN:
+                    print(f"{YELLOW}{idx}{RESET}. Debrid-Link")
+                    options.append(get_debrid_link_links)
+                    labels.append("Debrid-Link")
+                    idx += 1
 
                 show_find_best = sum(bool(x) for x in [
                     REAL_DEBRID_API_TOKEN,
                     ALLDEBRID_API_TOKEN,
                     PREMIUMIZE_API_TOKEN,
-                    TORBOX_API_TOKEN
+                    TORBOX_API_TOKEN,
+                    DEBRID_LINK_API_TOKEN
                 ]) > 1
 
             elif ext == ".nzb":
@@ -2026,12 +2327,18 @@ def main():
                 options.append(get_torbox_links)
                 labels.append("Torbox")
                 idx += 1
+            if DEBRID_LINK_API_TOKEN:
+                print(f"{YELLOW}{idx}{RESET}. Debrid-Link")
+                options.append(get_debrid_link_links)
+                labels.append("Debrid-Link")
+                idx += 1
 
             show_find_best = sum(bool(x) for x in [
                 REAL_DEBRID_API_TOKEN,
                 ALLDEBRID_API_TOKEN,
                 PREMIUMIZE_API_TOKEN,
-                TORBOX_API_TOKEN
+                TORBOX_API_TOKEN,
+                DEBRID_LINK_API_TOKEN
             ]) > 1
 
         if show_find_best:
