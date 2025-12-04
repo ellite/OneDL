@@ -2,6 +2,8 @@
 
 """
 OneDL - Universal Debrid & Downloader Tool
+https://github.com/ellite/OneDL
+By ellite
 
 OneDL is a command-line tool to simplify downloading from hosters, torrents, cloud debrid services, direct HTTP(S) links, and container files (.torrent & .nzb).
 It supports Real-Debrid, AllDebrid, Premiumize.me, Torbox and Debrid-Link, allowing you to resolve direct links from magnets,
@@ -21,7 +23,8 @@ FEATURES:
     - Lets you pick files from torrents, NZBs, or containers.
     - Colorful, user-friendly terminal output.
 
-Configure your API tokens at the top of this script for each service you want to use.
+Configure your API tokens by editing ~/.onedl.conf (check https://raw.githubusercontent.com/ellite/OneDL/refs/heads/main/.onedl.conf).
+More info: https://github.com/ellite/OneDL/blob/main/README.md
 """
 
 import os
@@ -34,13 +37,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.7.0"
-
-REAL_DEBRID_API_TOKEN = "" # https://real-debrid.com/devices
-ALLDEBRID_API_TOKEN = "" # https://alldebrid.com/apikeys/
-PREMIUMIZE_API_TOKEN = "" # https://www.premiumize.me/accoun
-TORBOX_API_TOKEN = "" # https://torbox.app/settings?section=account
-DEBRID_LINK_API_TOKEN = "" # https://debrid-link.com/webapp/apikey
+VERSION = "1.8.0"
 
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
@@ -48,6 +45,95 @@ GREEN = "\033[92m"
 RED = "\033[91m"
 RESET = "\033[0m"
 
+LOADED_PATH = None
+
+# --- CONFIGURATION LOADER ---
+def load_config():
+    # Define search paths in order of priority
+    search_paths = [
+        # 1. Same directory as the script (Portable / Windows friendly)
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".onedl.conf"),
+        # 2. User Home Directory (Linux/macOS standard)
+        os.path.join(os.path.expanduser("~"), ".onedl.conf")
+    ]
+
+    config = {}
+    loaded_path = None
+
+    for path in search_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    config = json.load(f)
+                loaded_path = path
+                break # Stop searching if found
+            except Exception as e:
+                print(f"{RED}Warning: Found config at {path} but failed to load: {e}{RESET}")
+
+    return config, loaded_path
+
+user_config, LOADED_PATH = load_config()
+
+# Load keys from config, default to empty string if missing
+REAL_DEBRID_API_TOKEN = user_config.get("REAL_DEBRID_API_TOKEN", "")
+ALLDEBRID_API_TOKEN = user_config.get("ALLDEBRID_API_TOKEN", "")
+PREMIUMIZE_API_TOKEN = user_config.get("PREMIUMIZE_API_TOKEN", "")
+TORBOX_API_TOKEN = user_config.get("TORBOX_API_TOKEN", "")
+DEBRID_LINK_API_TOKEN = user_config.get("DEBRID_LINK_API_TOKEN", "")
+
+# --- STATUS DASHBOARD ---
+def print_status_box():
+    # Define services map
+    services = [
+        ("Real-Debrid", REAL_DEBRID_API_TOKEN),
+        ("AllDebrid", ALLDEBRID_API_TOKEN),
+        ("Premiumize", PREMIUMIZE_API_TOKEN),
+        ("Torbox", TORBOX_API_TOKEN),
+        ("Debrid-Link", DEBRID_LINK_API_TOKEN)
+    ]
+
+    # Calculate box width
+    path_str = LOADED_PATH if LOADED_PATH else "None (Using defaults)"
+    box_width = max(50, len(path_str) + 14)
+    
+    # Helper to print lines
+    def print_line(content, color=CYAN):
+        print(f"{color}║{RESET} {content} {color}║{RESET}")
+    
+    def print_border(start, mid, end, color=CYAN):
+        print(f"{color}{start}{mid * (box_width - 2)}{end}{RESET}")
+
+    # --- DRAW BOX ---
+    print_border("╔", "═", "╗")
+    
+    # Title (Centered)
+    title = f"OneDL v{VERSION}"
+    padding = (box_width - 4 - len(title)) // 2
+    # Adjust right padding if odd length
+    r_padding = box_width - 4 - len(title) - padding
+    print_line(" " * padding + f"{YELLOW}{title}{RESET}" + " " * r_padding)
+    
+    print_border("╠", "═", "╣")
+    
+    # Config Path (Left Aligned)
+    label = "Config:"
+    spaces = box_width - 4 - len(label) - 1 - len(path_str)
+    print_line(f"{label} {GREEN}{path_str}{RESET}" + " " * spaces)
+    
+    print_border("╟", "─", "╢")
+    
+    # Service Status
+    for name, token in services:
+        status_text = "ENABLED" if token else "DISABLED"
+        status_color = GREEN if token else RED
+        
+        spaces = box_width - 4 - len(name) - 1 - len(status_text)
+        
+        # Construct the line
+        line_content = f"{name}:{ ' ' * spaces }{status_color}{status_text}{RESET}"
+        print_line(line_content)
+
+    print_border("╚", "═", "╝")
 
 def list_files():
     files = [f for f in os.listdir('.') if os.path.isfile(f)]
@@ -1097,7 +1183,7 @@ def get_torbox_links(url=None):
 
         return links
 
-    #  HOSTER MODE
+    #  HOSTER MODE  (non-magnet)
     md5_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
 
     check_resp = requests.post(
@@ -1544,7 +1630,7 @@ def get_debrid_link_links(url=None):
         
         return final_urls
 
-    # --- 2. MEGA FOLDER MODE ---
+    # --- 2. MEGA FOLDER MODE (New Addition) ---
     elif "mega.nz/folder/" in url and "/file/" not in url:
         print(f"{CYAN}Extracting MEGA folder contents...{RESET}")
         
@@ -1555,7 +1641,7 @@ def get_debrid_link_links(url=None):
             print(f"{RED}No files found in MEGA folder.{RESET}")
             return []
 
-        # Build display list for selector
+        # Build display list for selector (Using URL as name since helper only returns URLs)
         display_files = [{"name": link, "size": 0} for link in mega_links]
 
         # Interactive Selection
@@ -2200,7 +2286,7 @@ def list_container_files():
 
 
 def main():
-    print(f"{CYAN}OneDL v{VERSION}{RESET}")
+    print_status_box()
     print()
     print(f"{CYAN}What do you want to do?{RESET}")
     print(f"{YELLOW}1{RESET}. Paste URL(s)")
