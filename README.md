@@ -18,6 +18,7 @@ Whether you're pasting a magnet link or unlocking hoster URLs, OneDL handles eve
   - [AllDebrid](https://alldebrid.com/)
   - [Premiumize.me](https://www.premiumize.me/)
   - [Torbox](https://torbox.app/)
+  - [Debrid-Link](https://debrid-link.com/)
 - ✅ Automatically finds the best debrid service for your link  
 - ✅ Lets you select specific files from torrents, NZBs, and containers
 - ✅ Shows real-time download progress with speeds  
