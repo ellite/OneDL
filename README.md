@@ -117,11 +117,11 @@ nano ~/.onedl.conf
 
 ```json
 {
-  "REAL_DEBRID_API_TOKEN": "your_token_here",
-  "ALLDEBRID_API_TOKEN": "your_token_here",
-  "PREMIUMIZE_API_TOKEN": "your_token_here",
-  "TORBOX_API_TOKEN": "your_token_here",
-  "DEBRID_LINK_API_TOKEN": "your_token_here"
+  "REAL_DEBRID_API_TOKEN": "",
+  "ALLDEBRID_API_TOKEN": "",
+  "PREMIUMIZE_API_TOKEN": "",
+  "TORBOX_API_TOKEN": "",
+  "DEBRID_LINK_API_TOKEN": ""
 }
 ```
 
