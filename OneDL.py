@@ -37,7 +37,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
@@ -80,6 +80,33 @@ ALLDEBRID_API_TOKEN = user_config.get("ALLDEBRID_API_TOKEN", "")
 PREMIUMIZE_API_TOKEN = user_config.get("PREMIUMIZE_API_TOKEN", "")
 TORBOX_API_TOKEN = user_config.get("TORBOX_API_TOKEN", "")
 DEBRID_LINK_API_TOKEN = user_config.get("DEBRID_LINK_API_TOKEN", "")
+
+def check_for_updates():
+    update_url = "https://raw.githubusercontent.com/ellite/OneDL/main/OneDL.py"
+    
+    try:
+        response = requests.get(update_url, timeout=5)
+        response.raise_for_status()
+        
+        match = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', response.text)
+        
+        if match:
+            remote_version_str = match.group(1)
+            
+            local_ver = tuple(map(int, VERSION.split('.')))
+            remote_ver = tuple(map(int, remote_version_str.split('.')))
+            
+            if remote_ver > local_ver:
+                print(f"\n{YELLOW}┌────────────────────────────────────────────────┐{RESET}")
+                print(f"{YELLOW}│{RESET}  {GREEN}Update Available!{RESET} v{VERSION} -> v{remote_version_str}            {YELLOW}│{RESET}")
+                print(f"{YELLOW}│{RESET}  Run the update command in README to upgrade. {RESET} {YELLOW}│{RESET}")
+                print(f"{YELLOW}└────────────────────────────────────────────────┘{RESET}\n")
+                return True
+                
+    except Exception as e:
+        pass
+    
+    return False
 
 # --- STATUS DASHBOARD ---
 def print_status_box():
@@ -1103,26 +1130,52 @@ def get_torbox_links(url=None):
         torrent_id = data["data"].get("torrent_id") or data["data"].get("id")
         print(f"{GREEN}Torrent queued — ID {torrent_id}. Getting file list...{RESET}")
 
-        # 2. Fetch metadata with real file IDs
-        mylist_resp = requests.get(
-            "https://api.torbox.app/v1/api/torrents/mylist",
-            params={"token": token, "id": torrent_id},
-            headers=headers,
-            timeout=15
-        )
-        mylist_data = mylist_resp.json()
+        # 2. Poll /mylist until files are populated (handles metaDL state)
+        files = []
+        max_retries = 30   # ~2.5 minutes max
+        for attempt in range(max_retries):
+            mylist_resp = requests.get(
+                "https://api.torbox.app/v1/api/torrents/mylist",
+                params={
+                    "token": token,
+                    "id": torrent_id,
+                    "bypass_cache": "true"
+                },
+                headers=headers,
+                timeout=15
+            )
 
-        if not mylist_data.get("success") or not mylist_data.get("data"):
-            print(f"{RED}Failed to fetch file list from /mylist{RESET}")
+            if mylist_resp.status_code != 200:
+                time.sleep(5)
+                continue
+
+            mylist_data = mylist_resp.json()
+
+            if not mylist_data.get("success") or not mylist_data.get("data"):
+                time.sleep(5)
+                continue
+
+            torrent_info = mylist_data["data"]
+            state = torrent_info.get("download_state", "")
+            files = torrent_info.get("files") or []
+
+            if files:
+                print(f"\n{GREEN}Found {len(files)} files.{RESET}")
+                break
+
+            # Show live status while waiting
+            sys.stdout.write(
+                f"\r{YELLOW}Waiting for metadata... State: {state} (attempt {attempt+1}/{max_retries}){RESET}   "
+            )
+            sys.stdout.flush()
+            time.sleep(5)
+        else:
+            print(f"\n{RED}Timed out waiting for torrent metadata.{RESET}")
             return []
 
-        files = mylist_data["data"].get("files", [])
-        if not files:
-            print(f"{RED}No files found in torrent metadata.{RESET}")
-            return []
+        print()  # newline after progress
 
-        print(f"{GREEN}Found {len(files)} files. Checking which are ready...{RESET}")
-
+        # 3. File selection (unchanged)
         display_files = []
         for f in files:
             size = f.get("size", 0)
@@ -1135,7 +1188,7 @@ def get_torbox_links(url=None):
 
         links = []
 
-        # 3. Request download link for each selected file
+        # 4. Request download link for each selected file (unchanged)
         for idx in selected_indexes:
             f = files[idx]
             file_id = f["id"]
@@ -1143,7 +1196,6 @@ def get_torbox_links(url=None):
 
             print(f"{YELLOW}Waiting for file {CYAN}{idx+1}{RESET}: {name}{RESET}")
 
-            # Keep polling until ready
             while True:
                 r = requests.get(
                     "https://api.torbox.app/v1/api/torrents/requestdl",
@@ -1163,17 +1215,14 @@ def get_torbox_links(url=None):
                     links.append(download_url)
                     break
 
-                # File not ready yet
                 if "not ready" in resp_data.get("error", "").lower():
                     print(f"{YELLOW}File {idx + 1} not ready. Retrying...{RESET}")
                     time.sleep(5)
                     continue
 
-                # Unexpected error
                 print(f"{RED}Unexpected error for file {idx+1}: {resp_data}{RESET}")
                 break
 
-        # Final printing
         if links:
             print(f"{GREEN}Resolved direct links:{RESET}")
             for l in links:
@@ -2287,6 +2336,7 @@ def list_container_files():
 
 def main():
     print_status_box()
+    check_for_updates()
     print()
     print(f"{CYAN}What do you want to do?{RESET}")
     print(f"{YELLOW}1{RESET}. Paste URL(s)")
