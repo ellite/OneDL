@@ -37,7 +37,7 @@ import json
 import re
 import bencodepy
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
@@ -1130,10 +1130,12 @@ def get_torbox_links(url=None):
         torrent_id = data["data"].get("torrent_id") or data["data"].get("id")
         print(f"{GREEN}Torrent queued — ID {torrent_id}. Getting file list...{RESET}")
 
-        # 2. Poll /mylist until files are populated (handles metaDL state)
+        # 2. Poll /mylist — handle metaDL, downloading, and errors separately
         files = []
-        max_retries = 30   # ~2.5 minutes max
-        for attempt in range(max_retries):
+        meta_retries = 0
+        MAX_META_RETRIES = 12  # ~1 min max to get metadata, then assume stalled
+
+        while True:
             mylist_resp = requests.get(
                 "https://api.torbox.app/v1/api/torrents/mylist",
                 params={
@@ -1159,19 +1161,57 @@ def get_torbox_links(url=None):
             state = torrent_info.get("download_state", "")
             files = torrent_info.get("files") or []
 
+            # ✅ Files ready — proceed regardless of state
             if files:
                 print(f"\n{GREEN}Found {len(files)} files.{RESET}")
                 break
 
-            # Show live status while waiting
-            sys.stdout.write(
-                f"\r{YELLOW}Waiting for metadata... State: {state} (attempt {attempt+1}/{max_retries}){RESET}   "
-            )
+            # 🔄 Metadata phase — bounded wait
+            if state == "metaDL":
+                meta_retries += 1
+                if meta_retries >= MAX_META_RETRIES:
+                    print(f"\n{RED}Timed out waiting for torrent metadata (metaDL stalled).{RESET}")
+                    return []
+                sys.stdout.write(f"\r{YELLOW}Fetching torrent metadata... ({meta_retries}/{MAX_META_RETRIES}){RESET}   ")
+                sys.stdout.flush()
+                time.sleep(5)
+                continue
+
+            # ⬇️ Actively downloading to TorBox — show progress, wait indefinitely
+            if state == "downloading":
+                progress = torrent_info.get("progress", 0) * 100
+                speed = torrent_info.get("download_speed", 0) or 0
+                seeds = torrent_info.get("seeds", 0) or 0
+
+                if speed >= 1024 * 1024:
+                    speed_str = f"{speed/1024/1024:.2f} MB/s"
+                elif speed >= 1024:
+                    speed_str = f"{speed/1024:.1f} KB/s"
+                else:
+                    speed_str = f"{speed:.0f} B/s"
+
+                bar_length = 30
+                filled = int(progress * bar_length // 100)
+                bar = "#" * filled + "-" * (bar_length - filled)
+
+                sys.stdout.write(
+                    f"\r{YELLOW}Downloading to TorBox...{RESET} "
+                    f"[{YELLOW}{bar}{RESET}] {GREEN}{progress:.1f}%{RESET} "
+                    f"| {CYAN}{speed_str}{RESET} | Seeds: {GREEN}{seeds}{RESET}   "
+                )
+                sys.stdout.flush()
+                time.sleep(5)
+                continue
+
+            # ❌ Error or known terminal failure states — bail
+            if state in ("error", "stalledDL", "missingFiles", "checkingResumeData"):
+                print(f"\n{RED}Torrent failed with state: {state}{RESET}")
+                return []
+
+            # ⏳ Any other transient state (queued, pausedDL, etc.)
+            sys.stdout.write(f"\r{YELLOW}Waiting... State: {state}{RESET}   ")
             sys.stdout.flush()
             time.sleep(5)
-        else:
-            print(f"\n{RED}Timed out waiting for torrent metadata.{RESET}")
-            return []
 
         print()  # newline after progress
 
