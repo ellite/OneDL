@@ -36,8 +36,9 @@ import requests
 import json
 import re
 import bencodepy
+import argparse
 
-VERSION = "1.10.0"
+VERSION = "1.12.0"
 
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
@@ -107,6 +108,30 @@ def check_for_updates():
         pass
     
     return False
+
+def detect_url_type(url: str) -> str:
+    """
+    Returns: 'magnet', 'debrid_hoster', or 'direct'
+    """
+    if is_magnet(url):
+        return "magnet"
+
+    # Try checking if any configured debrid service supports this URL
+    for check_fn in [
+        check_real_debrid_cache,
+        check_alldebrid_cache,
+        check_premiumize_cache,
+        check_torbox_cache,
+        check_debrid_link_cache,
+    ]:
+        try:
+            result = check_fn(url)
+            if result and result[0] in ("supported", "unknown"):
+                return "debrid_hoster"
+        except Exception:
+            continue
+
+    return "direct"
 
 # --- STATUS DASHBOARD ---
 def print_status_box():
@@ -366,9 +391,11 @@ def download_file(url, filename=None):
 
             print()
             print(f"{GREEN}Saved as:{RESET} {YELLOW}{filename}{RESET}")
+            return True
 
     except Exception as e:
         print(f"{RED}Failed to download:{RESET} {YELLOW}{url}{RESET} {RED}- {e}{RESET}")
+        return False
 
 
 
@@ -2375,15 +2402,40 @@ def list_container_files():
 
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("-u", "--url", dest="url", default=None)
+    args, _ = parser.parse_known_args()
+
     print_status_box()
     check_for_updates()
+
+    # --- NON-INTERACTIVE URL MODE ---
+    if args.url:
+        url = args.url.strip()
+        print(f"\n{CYAN}URL mode:{RESET} {YELLOW}{url}{RESET}")
+        url_type = detect_url_type(url)
+
+        if url_type == "direct":
+            print(f"{GREEN}Detected: Direct URL. Downloading...{RESET}")
+            download_file(url)
+        else:
+            if url_type == "magnet":
+                print(f"{GREEN}Detected: Magnet link. Finding best debrid service...{RESET}")
+            else:
+                print(f"{GREEN}Detected: Debrid hoster URL. Finding best debrid service...{RESET}")
+            urls = find_best_debrid(url)
+            for idx, dl_url in enumerate(urls, 1):
+                print(f"\n{CYAN}Download {idx} of {len(urls)}:{RESET}")
+                download_file(dl_url)
+        return
     print()
     print(f"{CYAN}What do you want to do?{RESET}")
     print(f"{YELLOW}1{RESET}. Paste URL(s)")
     print(f"{YELLOW}2{RESET}. Load URLs from text file")
-    if REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or PREMIUMIZE_API_TOKEN or TORBOX_API_TOKEN:
+    if REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or PREMIUMIZE_API_TOKEN or TORBOX_API_TOKEN or DEBRID_LINK_API_TOKEN:
         print(f"{YELLOW}3{RESET}. Use Debrid Service")
-    choice = input("Enter 1, 2 or 3: ").strip()
+        print(f"{YELLOW}4{RESET}. Load URLs from file via Debrid Service")
+    choice = input("Enter 1, 2, 3 or 4: ").strip()
 
     if choice == '1':
         urls = get_urls_from_input()
@@ -2556,15 +2608,93 @@ def main():
             print(f"{RED}Invalid choice.{RESET}")
             return
 
+    elif choice == '4':
+        if not (REAL_DEBRID_API_TOKEN or ALLDEBRID_API_TOKEN or PREMIUMIZE_API_TOKEN or TORBOX_API_TOKEN or DEBRID_LINK_API_TOKEN):
+            print(f"{RED}No debrid services configured.{RESET}")
+            return
+
+        source_urls = get_urls_from_file()
+        if not source_urls:
+            return
+
+        print()
+        print(f"{CYAN}Which debrid service do you want to use?{RESET}")
+        svc_idx = 1
+        options = []
+        labels = []
+
+        if REAL_DEBRID_API_TOKEN:
+            print(f"{YELLOW}{svc_idx}{RESET}. Real-Debrid")
+            options.append(get_real_debrid_links)
+            labels.append("Real-Debrid")
+            svc_idx += 1
+        if ALLDEBRID_API_TOKEN:
+            print(f"{YELLOW}{svc_idx}{RESET}. AllDebrid")
+            options.append(get_alldebrid_links)
+            labels.append("AllDebrid")
+            svc_idx += 1
+        if PREMIUMIZE_API_TOKEN:
+            print(f"{YELLOW}{svc_idx}{RESET}. Premiumize.me")
+            options.append(get_premiumize_links)
+            labels.append("Premiumize.me")
+            svc_idx += 1
+        if TORBOX_API_TOKEN:
+            print(f"{YELLOW}{svc_idx}{RESET}. Torbox")
+            options.append(get_torbox_links)
+            labels.append("Torbox")
+            svc_idx += 1
+        if DEBRID_LINK_API_TOKEN:
+            print(f"{YELLOW}{svc_idx}{RESET}. Debrid-Link")
+            options.append(get_debrid_link_links)
+            labels.append("Debrid-Link")
+            svc_idx += 1
+
+        if sum(bool(x) for x in [REAL_DEBRID_API_TOKEN, ALLDEBRID_API_TOKEN, PREMIUMIZE_API_TOKEN, TORBOX_API_TOKEN, DEBRID_LINK_API_TOKEN]) > 1:
+            print(f"{YELLOW}{svc_idx}{RESET}. Find best option")
+            options.append(find_best_debrid)
+            labels.append("Find best option")
+
+        sub_choice = input("Enter your choice: ").strip()
+        if not sub_choice.isdigit() or not (1 <= int(sub_choice) <= len(options)):
+            print(f"{RED}Invalid choice.{RESET}")
+            return
+        sub_choice = int(sub_choice)
+
+        debrid_fn = options[sub_choice - 1]
+        label = labels[sub_choice - 1]
+        print(f"\n{CYAN}Using {label} to unrestrict {len(source_urls)} URL(s)...{RESET}")
+
+        urls = []
+        for i, src_url in enumerate(source_urls, 1):
+            print(f"\n{CYAN}[{i}/{len(source_urls)}] Unrestricting:{RESET} {YELLOW}{src_url}{RESET}")
+            result = debrid_fn(src_url)
+            if result:
+                urls.extend(result)
+            else:
+                print(f"{RED}  -> Failed or unsupported, skipping.{RESET}")
+
+        if not urls:
+            print(f"{RED}No links could be unrestricted.{RESET}")
+            return
+
     else:
         print(f"{RED}Invalid choice.{RESET}")
         return
 
     # Download phase
     total = len(urls)
+    completed = 0
+    failed = 0
     for idx, url in enumerate(urls, 1):
         print(f"\n{CYAN}Download {idx} of {total}:{RESET}")
-        download_file(url)
+        if download_file(url):
+            completed += 1
+        else:
+            failed += 1
+
+    if total > 1:
+        print(f"\n{CYAN}{'─' * 40}{RESET}")
+        print(f"{GREEN}Completed: {completed}{RESET}  {RED}Failed: {failed}{RESET}  {CYAN}Total: {total}{RESET}")
 
 
 if __name__ == '__main__':
